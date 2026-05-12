@@ -6,83 +6,94 @@ Written by NBTBoost (c) Atlanteg
 Graphical companion to kis_search.py.
 Requires Python 3.8+ with Tkinter (bundled in standard Python for Windows).
 
-Platform folders are auto-detected: any subfolder containing KIS.data
-in the same directory as this script (or the given base path).
-
-All platforms are preloaded in parallel at startup so switching is instant.
-A fast binary cache (.kis_gui_cache.pkl) is maintained per platform next to
-KIS.data — first scan takes ~1 min, every subsequent start is under 1 second.
+TIP for Windows: rename / copy this file as  kis_search_gui.pyw  so that
+double-clicking it launches pythonw.exe (no black console window at all).
 
 Usage:
     python kis_search_gui.py
     python kis_search_gui.py  C:\\path\\to\\databases
 """
 
-import pickle
-import queue
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 1 — absolute minimum imports so the window can open immediately
+# ══════════════════════════════════════════════════════════════════════════════
 import sys
-import threading
-import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
+import threading
+import queue
 from pathlib import Path
 
-# ── DPI awareness on Windows ──────────────────────────────────────────────────
-try:
-    import ctypes
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    pass
+# ── Hide the black Windows console window right away ─────────────────────────
+if sys.platform == "win32":
+    try:
+        import ctypes
+        _hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if _hwnd:
+            ctypes.windll.user32.ShowWindow(_hwnd, 0)   # SW_HIDE
+    except Exception:
+        pass
 
-# ── Shared logic from kis_search.py ──────────────────────────────────────────
-_THIS_DIR = Path(__file__).parent
-sys.path.insert(0, str(_THIS_DIR))
-try:
-    from kis_search import extract_entries, search, _parse_terms
-except ImportError as _e:
-    print(f"Error: kis_search.py must be in the same folder as this script.\n{_e}")
-    sys.exit(1)
+# ── DPI awareness (must be before Tk() on Windows) ───────────────────────────
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 APP_TITLE   = "BMW KIS Search  ·  Written by NBTBoost © Atlanteg"
-WIN_W       = 1150
-WIN_H       = 700
+WIN_W, WIN_H = 1150, 700
 FONT_UI     = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
 FONT_BOLD   = ("Segoe UI", 9, "bold")
-FONT_BIG    = ("Segoe UI", 13)
+FONT_BIG    = ("Segoe UI", 11)
 FONT_HUGE   = ("Segoe UI", 18, "bold")
 TYPES       = ["All", "SWFK", "CAFD", "BTLD", "HWEL", "FLSL", "ENTD", "HWAP", "SWFL"]
 SORT_OPTS   = ["sgbm_nr", "type", "version", "desc"]
+COL_IDS     = ("sgbm_nr", "type", "version", "full_id", "desc")
+COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
+COL_WIDTHS  = (92,          62,     88,         215,        390)
+COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
-COL_IDS    = ("sgbm_nr", "type", "version", "full_id", "desc")
-COL_HEADS  = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
-COL_WIDTHS = (92,          62,     88,         215,        390)
-COL_ANCHOR = ("w",         "c",    "w",        "w",        "w")
-
-# ── Colour palette ────────────────────────────────────────────────────────────
-C_BG      = "#1e1e2e"
-C_PANEL   = "#2a2a3e"
-C_INPUT   = "#313145"
-C_BORDER  = "#44445a"
-C_FG      = "#cdd6f4"
-C_DIM     = "#7f849c"
-C_ACCENT  = "#89b4fa"
-C_GREEN   = "#a6e3a1"
-C_YELLOW  = "#f9e2af"
-C_RED     = "#f38ba8"
-C_CYAN    = "#89dceb"
-C_SEL     = "#313160"
-C_ROW_ALT = "#252538"
-C_OVERLAY = "#1a1a28"
+C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"
+C_BORDER  = "#44445a"; C_FG      = "#cdd6f4"; C_DIM     = "#7f849c"
+C_ACCENT  = "#89b4fa"; C_GREEN   = "#a6e3a1"; C_YELLOW  = "#f9e2af"
+C_RED     = "#f38ba8"; C_CYAN    = "#89dceb"; C_SEL     = "#313160"
+C_ROW_ALT = "#252538"; C_OVERLAY = "#1a1a28"
 
 TYPE_COLORS = {
-    "SWFK": C_GREEN, "CAFD": C_YELLOW,
-    "BTLD": C_CYAN,  "HWEL": C_ACCENT, "FLSL": "#cba6f7",
+    "SWFK": C_GREEN,  "CAFD": C_YELLOW,
+    "BTLD": C_CYAN,   "HWEL": C_ACCENT, "FLSL": "#cba6f7",
 }
-
-# Spinner frames (cycling arrow)
 _SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+
+_THIS_DIR = Path(__file__).parent
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2 — heavy imports happen in a background thread AFTER window is shown
+# ══════════════════════════════════════════════════════════════════════════════
+
+# These are filled in by the import thread and then used by the app
+_extract_entries = None
+_search          = None
+_parse_terms     = None
+_pickle          = None
+_time_mod        = None
+
+
+def _do_heavy_imports(result_q: queue.Queue):
+    """Run in a thread: import everything not needed for first render."""
+    try:
+        import pickle as _pk
+        import time   as _tm
+        sys.path.insert(0, str(_THIS_DIR))
+        from kis_search import extract_entries, search, _parse_terms as pt
+        result_q.put(("imports_ok", _pk, _tm, extract_entries, search, pt))
+    except Exception as e:
+        result_q.put(("imports_err", str(e)))
 
 
 # ── Fast pickle cache (per platform) ─────────────────────────────────────────
@@ -90,41 +101,41 @@ _SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 def _pkl_path(db_path: Path) -> Path:
     return db_path.parent / ".kis_gui_cache.pkl"
 
-def load_fast_cache(db_path: Path):
-    """Load pickle cache if it exists and is newer than KIS.data."""
+
+def _load_fast_cache(db_path: Path):
     pkl = _pkl_path(db_path)
     try:
         if pkl.exists() and pkl.stat().st_mtime >= db_path.stat().st_mtime:
             with open(pkl, "rb") as f:
-                return pickle.load(f)
+                return _pickle.load(f)
     except Exception:
         pass
     return None
 
-def save_fast_cache(db_path: Path, entries: list):
-    """Save entries to pickle cache."""
+
+def _save_fast_cache(db_path: Path, entries: list):
     try:
         with open(_pkl_path(db_path), "wb") as f:
-            pickle.dump(entries, f, protocol=pickle.HIGHEST_PROTOCOL)
+            _pickle.dump(entries, f, protocol=_pickle.HIGHEST_PROTOCOL)
     except Exception as e:
         print(f"Warning: could not save GUI cache: {e}")
 
 
-# ── Application ───────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Application
+# ══════════════════════════════════════════════════════════════════════════════
 
 class KisSearchApp:
     def __init__(self, root: tk.Tk, base_path: Path):
         self.root      = root
         self.base_path = base_path
 
-        # per-platform state
-        self.platforms   : list[Path] = []   # Path to each platform folder
-        self._db         : dict[str, list | None] = {}   # name → entries | None
-        self._loading    : set[str] = set()  # names currently loading
-        self._queues     : dict[str, queue.Queue] = {}
+        self.platforms: list[Path] = []
+        self._db     : dict[str, list | None] = {}
+        self._loading: set[str]  = set()
+        self._queues : dict[str, queue.Queue] = {}
 
-        # current view
-        self.entries     : list = []
+        self.entries    : list = []
         self._sort_col   = "sgbm_nr"
         self._sort_rev   = False
         self._debounce   = None
@@ -146,29 +157,21 @@ class KisSearchApp:
         s = ttk.Style()
         for theme in ("clam", "alt", "default"):
             if theme in s.theme_names():
-                s.theme_use(theme)
-                break
+                s.theme_use(theme); break
 
-        s.configure(".",           background=C_BG, foreground=C_FG,
-                    font=FONT_UI,  borderwidth=0, relief="flat")
-        s.configure("TFrame",      background=C_BG)
-        s.configure("P.TFrame",    background=C_PANEL)
-        s.configure("TLabel",      background=C_BG,    foreground=C_FG,  font=FONT_UI)
-        s.configure("Dim.TLabel",  background=C_BG,    foreground=C_DIM, font=FONT_UI)
-        s.configure("P.TLabel",    background=C_PANEL, foreground=C_FG,  font=FONT_UI)
-        s.configure("PD.TLabel",   background=C_PANEL, foreground=C_DIM, font=FONT_UI)
-        s.configure("Ov.TLabel",   background=C_OVERLAY, foreground=C_FG)
-        s.configure("OvD.TLabel",  background=C_OVERLAY, foreground=C_DIM)
-        s.configure("OvH.TLabel",  background=C_OVERLAY, foreground=C_ACCENT,
-                    font=FONT_HUGE)
-        s.configure("OvS.TLabel",  background=C_OVERLAY, foreground=C_DIM,
-                    font=FONT_BIG)
+        s.configure(".",          background=C_BG, foreground=C_FG, font=FONT_UI,
+                    borderwidth=0, relief="flat")
+        s.configure("TFrame",     background=C_BG)
+        s.configure("P.TFrame",   background=C_PANEL)
+        s.configure("TLabel",     background=C_BG,    foreground=C_FG,  font=FONT_UI)
+        s.configure("Dim.TLabel", background=C_BG,    foreground=C_DIM, font=FONT_UI)
+        s.configure("P.TLabel",   background=C_PANEL, foreground=C_FG,  font=FONT_UI)
+        s.configure("PD.TLabel",  background=C_PANEL, foreground=C_DIM, font=FONT_UI)
 
         s.configure("TButton", background=C_ACCENT, foreground=C_BG,
                     font=FONT_BOLD, padding=(12, 5), relief="flat")
         s.map("TButton", background=[("active","#74a0ea"),("pressed","#5a8cd0"),
                                      ("disabled", C_BORDER)])
-
         s.configure("Sm.TButton", background=C_PANEL, foreground=C_DIM,
                     font=FONT_UI, padding=(8, 4), relief="flat")
         s.map("Sm.TButton", background=[("active", C_BORDER)])
@@ -179,7 +182,7 @@ class KisSearchApp:
         s.map("TCombobox",
               fieldbackground=[("readonly", C_INPUT)],
               selectbackground=[("readonly", C_INPUT)],
-              foreground=[("readonly", C_FG)])
+              foreground      =[("readonly", C_FG)])
 
         s.configure("TEntry", fieldbackground=C_INPUT, foreground=C_FG,
                     insertcolor=C_FG, selectbackground=C_SEL,
@@ -196,8 +199,12 @@ class KisSearchApp:
         s.map("Treeview.Heading",
               background=[("active", C_ACCENT), ("pressed", C_ACCENT)])
 
-        s.configure("TProgressbar", troughcolor=C_PANEL,
-                    background=C_ACCENT, borderwidth=0)
+        s.configure("Det.Horizontal.TProgressbar",
+                    troughcolor=C_PANEL, background=C_ACCENT,
+                    borderwidth=0, thickness=8)
+        s.configure("Ind.Horizontal.TProgressbar",
+                    troughcolor=C_PANEL, background=C_ACCENT,
+                    borderwidth=0, thickness=8)
         s.configure("TScrollbar", background=C_PANEL, troughcolor=C_BG,
                     arrowcolor=C_DIM, relief="flat", borderwidth=0)
 
@@ -207,14 +214,13 @@ class KisSearchApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
 
-        # ── Top bar ───────────────────────────────────────────────────────────
+        # Top bar
         top = ttk.Frame(self.root, style="P.TFrame", padding=(12, 8))
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(3, weight=1)
 
         ttk.Label(top, text="Платформа:", style="P.TLabel").grid(
             row=0, column=0, padx=(0, 6))
-
         self.var_platform = tk.StringVar()
         self.cb_platform  = ttk.Combobox(
             top, textvariable=self.var_platform,
@@ -230,18 +236,15 @@ class KisSearchApp:
                                        background=C_PANEL)
         self.lbl_plat_info.grid(row=0, column=3, sticky="w")
 
-        # loading indicators per platform (shown right side)
         self.lbl_loading_all = ttk.Label(top, text="", style="P.TLabel",
                                          background=C_PANEL, foreground=C_ACCENT)
         self.lbl_loading_all.grid(row=0, column=4, sticky="e", padx=(10, 0))
 
-        # ── Search controls ───────────────────────────────────────────────────
+        # Search controls
         sf = ttk.Frame(self.root, padding=(12, 8, 12, 4))
         sf.grid(row=1, column=0, sticky="ew")
         sf.columnconfigure(1, weight=1)
-        sf.columnconfigure(4, weight=0)
 
-        # Row 0: include
         ttk.Label(sf, text="Поиск:").grid(
             row=0, column=0, sticky="e", padx=(0, 6))
         self.var_include = tk.StringVar()
@@ -258,12 +261,10 @@ class KisSearchApp:
         cb_type.grid(row=0, column=3, sticky="w", padx=(0, 12))
         cb_type.bind("<<ComboboxSelected>>", lambda e: self._do_search())
 
-        self.btn_search = ttk.Button(sf, text="Найти",
-                                     command=self._do_search)
+        self.btn_search = ttk.Button(sf, text="Найти", command=self._do_search)
         self.btn_search.grid(row=0, column=5, rowspan=2, sticky="ns",
                              padx=(12, 0), ipadx=8)
 
-        # Row 1: exclude + sort
         ttk.Label(sf, text="Исключить:").grid(
             row=1, column=0, sticky="e", padx=(0, 6), pady=(5, 0))
         self.var_exclude = tk.StringVar()
@@ -283,13 +284,12 @@ class KisSearchApp:
         ttk.Button(sf, text="✕ Очистить", style="Sm.TButton",
                    command=self._clear).grid(row=1, column=4, pady=(5, 0))
 
-        # ── Results area (treeview + loading overlay) ─────────────────────────
+        # Results area + overlay
         self.rf = ttk.Frame(self.root)
         self.rf.grid(row=2, column=0, sticky="nsew", padx=10, pady=(4, 0))
         self.rf.columnconfigure(0, weight=1)
         self.rf.rowconfigure(0, weight=1)
 
-        # Treeview
         self.tree = ttk.Treeview(self.rf, columns=COL_IDS, show="headings",
                                  selectmode="extended")
         for cid, head, w, anc in zip(COL_IDS, COL_HEADS, COL_WIDTHS, COL_ANCHOR):
@@ -297,10 +297,8 @@ class KisSearchApp:
                               command=lambda c=cid: self._sort_by(c))
             self.tree.column(cid, width=w, minwidth=40, anchor=anc,
                              stretch=(cid == "desc"))
-        vsb = ttk.Scrollbar(self.rf, orient="vertical",
-                            command=self.tree.yview)
-        hsb = ttk.Scrollbar(self.rf, orient="horizontal",
-                            command=self.tree.xview)
+        vsb = ttk.Scrollbar(self.rf, orient="vertical",   command=self.tree.yview)
+        hsb = ttk.Scrollbar(self.rf, orient="horizontal",  command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -316,70 +314,94 @@ class KisSearchApp:
         self.tree.bind("<Control-c>", self._copy_full_id)
         self.tree.bind("<Button-3>",  self._show_ctx_menu)
 
-        # Loading overlay (shown over treeview while platform is loading)
+        # ── Loading overlay ───────────────────────────────────────────────────
         self.overlay = tk.Frame(self.rf, bg=C_OVERLAY)
-        # Not placed yet; shown via _show_overlay / _hide_overlay
 
         self.lbl_spin = tk.Label(self.overlay, text="", bg=C_OVERLAY,
-                                 fg=C_ACCENT, font=("Segoe UI", 22, "bold"))
-        self.lbl_spin.place(relx=0.5, rely=0.38, anchor="center")
+                                 fg=C_ACCENT, font=("Segoe UI", 26, "bold"))
+        self.lbl_spin.place(relx=0.5, rely=0.32, anchor="center")
 
         self.lbl_load_title = tk.Label(self.overlay, text="",
                                        bg=C_OVERLAY, fg=C_FG,
-                                       font=("Segoe UI", 14, "bold"))
-        self.lbl_load_title.place(relx=0.5, rely=0.48, anchor="center")
+                                       font=("Segoe UI", 15, "bold"))
+        self.lbl_load_title.place(relx=0.5, rely=0.44, anchor="center")
 
         self.lbl_load_sub = tk.Label(self.overlay, text="",
                                      bg=C_OVERLAY, fg=C_DIM,
                                      font=("Segoe UI", 10))
-        self.lbl_load_sub.place(relx=0.5, rely=0.56, anchor="center")
+        self.lbl_load_sub.place(relx=0.5, rely=0.53, anchor="center")
 
-        self.pbar = ttk.Progressbar(self.overlay, mode="indeterminate",
-                                    length=320)
-        self.pbar.place(relx=0.5, rely=0.64, anchor="center")
+        # determinate progress bar (shows % when scanning; hidden while from cache)
+        self.pbar_det = ttk.Progressbar(
+            self.overlay, style="Det.Horizontal.TProgressbar",
+            mode="determinate", length=360, maximum=100)
+        self.pbar_det.place(relx=0.5, rely=0.62, anchor="center")
 
-        # ── Status bar ────────────────────────────────────────────────────────
+        # indeterminate bar (cache load / short waits)
+        self.pbar_ind = ttk.Progressbar(
+            self.overlay, style="Ind.Horizontal.TProgressbar",
+            mode="indeterminate", length=360)
+        self.pbar_ind.place(relx=0.5, rely=0.62, anchor="center")
+
+        self.lbl_load_pct = tk.Label(self.overlay, text="",
+                                     bg=C_OVERLAY, fg=C_ACCENT,
+                                     font=("Segoe UI", 9))
+        self.lbl_load_pct.place(relx=0.5, rely=0.70, anchor="center")
+
+        # Status bar
         sb = ttk.Frame(self.root, padding=(12, 4))
         sb.grid(row=3, column=0, sticky="ew")
         sb.columnconfigure(0, weight=1)
-
         self.var_status = tk.StringVar(value="Инициализация…")
         ttk.Label(sb, textvariable=self.var_status,
                   style="Dim.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(sb, text="ДвойнойКлик / Ctrl+C → копировать Full ID",
                   style="Dim.TLabel").grid(row=0, column=1, sticky="e")
 
-        # ── Context menu ──────────────────────────────────────────────────────
+        # Context menu
         self._ctx = tk.Menu(self.root, tearoff=False,
                             bg=C_PANEL, fg=C_FG,
                             activebackground=C_ACCENT, activeforeground=C_BG,
                             font=FONT_UI)
-        self._ctx.add_command(label="Копировать Full ID",
-                              command=self._copy_full_id)
-        self._ctx.add_command(label="Копировать SGBM_NR",
-                              command=lambda: self._copy_col(0))
-        self._ctx.add_command(label="Копировать описание",
-                              command=lambda: self._copy_col(4))
+        self._ctx.add_command(label="Копировать Full ID",   command=self._copy_full_id)
+        self._ctx.add_command(label="Копировать SGBM_NR",   command=lambda: self._copy_col(0))
+        self._ctx.add_command(label="Копировать описание",  command=lambda: self._copy_col(4))
         self._ctx.add_separator()
-        self._ctx.add_command(label="Копировать все строки (TSV)",
-                              command=self._copy_all_tsv)
+        self._ctx.add_command(label="Копировать все строки (TSV)", command=self._copy_all_tsv)
 
-    # ── Overlay animation ─────────────────────────────────────────────────────
+    # ── Overlay ───────────────────────────────────────────────────────────────
 
-    def _show_overlay(self, title: str, sub: str = ""):
+    def _show_overlay(self, title: str, sub: str = "", scan_mode: bool = False):
+        """Display loading overlay.
+        scan_mode=True  → show determinate % bar (for binary scan).
+        scan_mode=False → show indeterminate bar (for cache load).
+        """
         self.lbl_load_title.config(text=title)
         self.lbl_load_sub.config(text=sub)
+        self.lbl_load_pct.config(text="")
+        self._scan_mode = scan_mode
+
+        if scan_mode:
+            self.pbar_ind.stop()
+            self.pbar_ind.place_forget()
+            self.pbar_det["value"] = 0
+            self.pbar_det.place(relx=0.5, rely=0.62, anchor="center")
+        else:
+            self.pbar_det.place_forget()
+            self.pbar_ind.place(relx=0.5, rely=0.62, anchor="center")
+            self.pbar_ind.start(14)
+
         self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.overlay.lift()
-        self.pbar.start(14)
         self._spin_idx = 0
-        self._animate_spin()
+        if not self._spin_after:
+            self._animate_spin()
 
     def _hide_overlay(self):
         if self._spin_after:
             self.root.after_cancel(self._spin_after)
             self._spin_after = None
-        self.pbar.stop()
+        self.pbar_ind.stop()
         self.overlay.place_forget()
 
     def _animate_spin(self):
@@ -388,10 +410,28 @@ class KisSearchApp:
         self._spin_idx += 1
         self._spin_after = self.root.after(100, self._animate_spin)
 
+    def _update_progress(self, pct: float):
+        """Called from _poll_all when a 'progress' message arrives (scan mode)."""
+        self.pbar_det["value"] = pct * 100
+        self.lbl_load_pct.config(text=f"{pct * 100:.0f}%  ·  "
+                                      f"осталось ~{self._eta_str(pct)}")
+
+    # small helper: very rough ETA
+    _scan_start: float = 0.0
+
+    def _eta_str(self, pct: float) -> str:
+        if pct <= 0.01 or not self._scan_start:
+            return "…"
+        elapsed = _time_mod.time() - self._scan_start
+        total   = elapsed / pct
+        rem     = total - elapsed
+        if rem < 60:
+            return f"{rem:.0f} с"
+        return f"{rem / 60:.1f} мин"
+
     # ── Platform detection & preloading ──────────────────────────────────────
 
     def _find_and_preload(self):
-        """Discover all platform folders, populate dropdown, start loading all."""
         found = []
         base  = self.base_path
         if base.is_dir():
@@ -401,8 +441,8 @@ class KisSearchApp:
         if (base / "KIS.data").exists() and base not in found:
             found.insert(0, base)
 
-        self.platforms = found
-        names = [p.name for p in found]
+        self.platforms         = found
+        names                  = [p.name for p in found]
         self.cb_platform["values"] = names
 
         if not found:
@@ -410,136 +450,139 @@ class KisSearchApp:
                              "Разместите скрипт рядом с папками платформ.")
             return
 
-        # Pre-initialise state
         for p in found:
             self._db[p.name]     = None
             self._queues[p.name] = queue.Queue()
 
-        # Select first platform, show overlay
         self.cb_platform.current(0)
-        first = found[0].name
+        first    = found[0]
+        from_pkl = _pkl_path(first / "KIS.data").exists()
         self._show_overlay(
-            f"Загрузка базы данных  {first}",
-            "Первый запуск займёт ~1 минуту — создаётся кэш…"
-            if not _pkl_path(found[0] / "KIS.data").exists()
-            else "Загрузка из кэша…"
+            f"Загрузка базы данных  {first.name}",
+            "Загрузка из кэша…" if from_pkl
+            else "Первый запуск — сканирование ~1 мин…",
+            scan_mode=not from_pkl,
         )
+        if not from_pkl:
+            self._scan_start = _time_mod.time()
 
-        # Start loading ALL platforms in background
+        # ── CRITICAL: force window render NOW before threads start ────────────
+        self.root.update()
+
         for p in found:
             self._start_load_thread(p)
-
-        # Poll loop
-        self.root.after(120, self._poll_all)
+        self.root.after(80, self._poll_all)
 
     def _start_load_thread(self, plat_path: Path, force: bool = False):
-        name   = plat_path.name
-        db     = plat_path / "KIS.data"
-        q      = self._queues[name]
+        name = plat_path.name
+        db   = plat_path / "KIS.data"
+        q    = self._queues[name]
         self._loading.add(name)
+
+        def _progress_cb(pct: float):
+            q.put(("progress", name, pct))
 
         def _worker():
             try:
-                t0 = time.time()
+                t0 = _time_mod.time()
                 if not force:
-                    cached = load_fast_cache(db)
+                    cached = _load_fast_cache(db)
                     if cached is not None:
-                        q.put(("done", name, cached, True, time.time() - t0))
+                        q.put(("done", name, cached, True, _time_mod.time() - t0))
                         return
-                entries = extract_entries(db, progress=False)
-                save_fast_cache(db, entries)
-                q.put(("done", name, entries, False, time.time() - t0))
+                entries = _extract_entries(db, progress=False,
+                                           progress_cb=_progress_cb)
+                _save_fast_cache(db, entries)
+                q.put(("done", name, entries, False, _time_mod.time() - t0))
             except Exception as exc:
                 q.put(("error", name, str(exc)))
 
-        threading.Thread(target=_worker, daemon=True, name=f"load-{name}").start()
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"load-{name}").start()
 
     def _poll_all(self):
-        """Check all loading queues; update UI when any finishes."""
         active = self.cb_platform.get()
 
-        finished_now = []
         for name, q in self._queues.items():
-            try:
-                msg = q.get_nowait()
-            except queue.Empty:
-                continue
+            # drain entire queue for this platform
+            while True:
+                try:
+                    msg = q.get_nowait()
+                except queue.Empty:
+                    break
 
-            if msg[0] == "done":
-                _, pname, entries, from_cache, elapsed = msg
-                self._db[pname] = entries
-                self._loading.discard(pname)
-                finished_now.append((pname, len(entries), from_cache, elapsed))
-            else:
-                _, pname, err = msg
-                self._db[pname] = []
-                self._loading.discard(pname)
-                messagebox.showerror(
-                    "Ошибка загрузки",
-                    f"Платформа {pname}:\n{err}")
+                kind = msg[0]
+                if kind == "progress":
+                    _, pname, pct = msg
+                    if pname == active and getattr(self, "_scan_mode", False):
+                        self._update_progress(pct)
 
-        # Update UI when active platform finishes
-        for pname, n, from_cache, elapsed in finished_now:
-            if pname == active:
-                self.entries = self._db[pname]
-                src = "кэш" if from_cache else f"сканирование {elapsed:.0f}с"
-                self.lbl_plat_info.config(
-                    text=f"{pname}  ·  {n:,} записей  ({src})")
-                self._do_search()
+                elif kind == "done":
+                    _, pname, entries, from_cache, elapsed = msg
+                    self._db[pname] = entries
+                    self._loading.discard(pname)
+                    if pname == active:
+                        self.entries = entries
+                        src = "кэш" if from_cache else f"сканирование {elapsed:.0f}с"
+                        self.lbl_plat_info.config(
+                            text=f"{pname}  ·  {len(entries):,} записей  ({src})")
+                        self._hide_overlay()
+                        self._do_search()
+                        still = len(self._loading)
+                        st = f"Готово — {len(entries):,} записей  [{pname}]"
+                        if still:
+                            st += f"  ·  загружается ещё {still} платф. в фоне…"
+                        self._set_status(st)
 
-        # If active platform is now loaded, hide overlay
-        if active not in self._loading and self._db.get(active) is not None:
-            self._hide_overlay()
-            n = len(self._db[active])
-            still = len(self._loading)
-            status = f"Готово — {n:,} записей  [{active}]"
-            if still:
-                status += f"  ·  загружается ещё {still} платформ в фоне…"
-            self._set_status(status)
+                elif kind == "error":
+                    _, pname, err = msg
+                    self._db[pname] = []
+                    self._loading.discard(pname)
+                    from tkinter import messagebox
+                    messagebox.showerror("Ошибка загрузки",
+                                         f"Платформа {pname}:\n{err}")
 
-        # Update top-bar loading indicator
-        still_loading = sorted(self._loading)
-        if still_loading:
+        # top-bar indicator
+        still = sorted(self._loading)
+        if still:
             spin = _SPINNER[self._spin_idx % len(_SPINNER)]
             self.lbl_loading_all.config(
-                text=f"{spin} загружается: {', '.join(still_loading)}")
+                text=f"{spin} загружается: {', '.join(still)}")
         else:
             self.lbl_loading_all.config(text="✓ все платформы готовы")
 
-        # Keep polling while anything still loading
         if self._loading:
-            self.root.after(120, self._poll_all)
+            self.root.after(80, self._poll_all)
 
     # ── Platform switching ────────────────────────────────────────────────────
 
     def _on_platform_change(self, _event=None):
-        name = self.var_platform.get()
+        name    = self.var_platform.get()
         entries = self._db.get(name)
 
         if entries is not None:
-            # Already loaded → instant switch
             self.entries = entries
             n = len(entries)
             self.lbl_plat_info.config(text=f"{name}  ·  {n:,} записей")
             self._do_search()
             self._set_status(f"Платформа: {name}  ·  {n:,} записей")
         else:
-            # Still loading → show overlay and wait
             self.entries = []
             self._clear_table()
-            is_first = not _pkl_path(
-                next(p for p in self.platforms if p.name == name) / "KIS.data"
-            ).exists()
+            plat_path = next(p for p in self.platforms if p.name == name)
+            from_pkl  = _pkl_path(plat_path / "KIS.data").exists()
             self._show_overlay(
                 f"Загрузка  {name}",
-                "Первый запуск — создаётся кэш (~1 мин)…" if is_first
-                else "Загрузка из кэша…"
+                "Загрузка из кэша…" if from_pkl
+                else "Первый запуск — сканирование ~1 мин…",
+                scan_mode=not from_pkl,
             )
+            if not from_pkl:
+                self._scan_start = _time_mod.time()
             self._set_status(f"Загрузка платформы {name}…")
             self._wait_for_platform(name)
 
     def _wait_for_platform(self, name: str):
-        """Poll until the requested platform finishes loading."""
         entries = self._db.get(name)
         if entries is not None:
             self.entries = entries
@@ -549,12 +592,17 @@ class KisSearchApp:
                 text=f"{name}  ·  {len(entries):,} записей")
             self._set_status(f"Платформа: {name}  ·  {len(entries):,} записей")
             return
-        # Still loading — try the queue
+
         q = self._queues.get(name)
         if q:
             try:
                 msg = q.get_nowait()
-                if msg[0] == "done":
+                kind = msg[0]
+                if kind == "progress":
+                    _, pname, pct = msg
+                    if pname == name and getattr(self, "_scan_mode", False):
+                        self._update_progress(pct)
+                elif kind == "done":
                     _, pname, loaded, from_cache, elapsed = msg
                     self._db[pname] = loaded
                     self._loading.discard(pname)
@@ -568,22 +616,34 @@ class KisSearchApp:
                         self._set_status(
                             f"Платформа: {name}  ·  {len(loaded):,} записей")
                         return
+                elif kind == "error":
+                    _, pname, err = msg
+                    self._db[pname] = []
+                    self._loading.discard(pname)
+                    self._hide_overlay()
+                    from tkinter import messagebox
+                    messagebox.showerror("Ошибка загрузки",
+                                         f"Платформа {pname}:\n{err}")
+                    return
             except queue.Empty:
                 pass
-        self.root.after(150, lambda: self._wait_for_platform(name))
+
+        self.root.after(100, lambda: self._wait_for_platform(name))
 
     def _reload_db(self):
         name = self.var_platform.get()
         plat = next((p for p in self.platforms if p.name == name), None)
         if not plat:
             return
-        self._db[name] = None
+        self._db[name]     = None
         self._loading.add(name)
         self._queues[name] = queue.Queue()
         self.entries = []
         self._clear_table()
         self._show_overlay(f"Пересканирование  {name}",
-                           "Повторное считывание базы данных…")
+                           "Повторное считывание базы данных…",
+                           scan_mode=True)
+        self._scan_start = _time_mod.time()
         self._set_status(f"Перезагрузка {name}…")
         self._start_load_thread(plat, force=True)
         self._wait_for_platform(name)
@@ -598,7 +658,6 @@ class KisSearchApp:
     def _do_search(self):
         if not self.entries:
             return
-
         inc_raw = self.var_include.get().strip()
         exc_raw = self.var_exclude.get().strip()
         tf      = self.var_type.get()
@@ -608,7 +667,7 @@ class KisSearchApp:
         exc       = exc_raw.split() if exc_raw else []
         tf_arg    = None if tf == "All" else tf
 
-        results = search(self.entries, groups, exclude=exc, type_filter=tf_arg)
+        results = _search(self.entries, groups, exclude=exc, type_filter=tf_arg)
 
         rev = self._sort_rev if self._sort_col == sort_by else False
         self._sort_col = sort_by
@@ -622,10 +681,8 @@ class KisSearchApp:
         self._populate_table(results)
 
         parts = [f"{len(results):,} результатов"]
-        if inc_raw:
-            parts.append(f"поиск: {inc_raw}")
-        if exc_raw:
-            parts.append(f"исключить: {exc_raw}")
+        if inc_raw:  parts.append(f"поиск: {inc_raw}")
+        if exc_raw:  parts.append(f"исключить: {exc_raw}")
         self._set_status("  ·  ".join(parts))
 
     def _clear(self):
@@ -641,17 +698,15 @@ class KisSearchApp:
 
     def _populate_table(self, results: list):
         self._clear_table()
-        prev_nr = None
-        alt     = False
+        prev_nr, alt = None, False
         for e in results:
             if e["sgbm_nr"] != prev_nr:
                 if prev_nr is not None:
                     alt = not alt
                 prev_nr = e["sgbm_nr"]
-            tname = e["type"]
-            tag   = f"t_{tname}" + ("_alt" if alt else "")
+            tag = f"t_{e['type']}" + ("_alt" if alt else "")
             self.tree.insert("", "end",
-                             values=(e["sgbm_nr"], tname, e["version"],
+                             values=(e["sgbm_nr"], e["type"], e["version"],
                                      e["full_id"], e["desc"]),
                              tags=(tag,))
 
@@ -662,10 +717,10 @@ class KisSearchApp:
         self._sort_rev = (not self._sort_rev) if self._sort_col == sk else False
         self.var_sort.set(sk)
         self._do_search()
+        heads = dict(zip(COL_IDS, COL_HEADS))
         for c in COL_IDS:
-            base = dict(zip(COL_IDS, COL_HEADS))[c]
             arrow = (" ▲" if not self._sort_rev else " ▼") if c == col else ""
-            self.tree.heading(c, text=base + arrow)
+            self.tree.heading(c, text=heads[c] + arrow)
 
     # ── Clipboard ─────────────────────────────────────────────────────────────
 
@@ -674,14 +729,12 @@ class KisSearchApp:
 
     def _copy_col(self, idx, _event=None):
         rows = self._sel_values()
-        if not rows:
-            return
+        if not rows: return
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(str(r[idx]) for r in rows))
         self._set_status(f"Скопировано {len(rows)} значений.")
 
     def _copy_full_id(self, _event=None): self._copy_col(3)
-
     def _on_double_click(self, _event=None): self._copy_full_id()
 
     def _copy_all_tsv(self):
@@ -700,18 +753,87 @@ class KisSearchApp:
                 self.tree.selection_set(iid)
             self._ctx.post(e.x_root, e.y_root)
 
-    # ── Misc ──────────────────────────────────────────────────────────────────
-
     def _set_status(self, text: str):
         self.var_status.set(text)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Bootstrap: show window → import heavy modules → start app
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _wait_for_imports(root: tk.Tk, base_path: Path,
+                      import_q: queue.Queue,
+                      splash_frame: tk.Frame,
+                      splash_lbl: tk.Label,
+                      spin_lbl: tk.Label,
+                      spin_state: list):
+    """Poll until heavy imports finish, then build the real UI."""
+    try:
+        msg = import_q.get_nowait()
+    except queue.Empty:
+        # still loading — update spinner
+        spin_state[0] = (spin_state[0] + 1) % len(_SPINNER)
+        spin_lbl.config(text=_SPINNER[spin_state[0]])
+        root.after(100, lambda: _wait_for_imports(
+            root, base_path, import_q, splash_frame, splash_lbl, spin_lbl, spin_state))
+        return
+
+    kind = msg[0]
+    if kind == "imports_err":
+        from tkinter import messagebox
+        messagebox.showerror("Ошибка импорта",
+                             f"Не удалось загрузить kis_search.py:\n{msg[1]}")
+        root.destroy()
+        return
+
+    # Imports succeeded — wire up globals and build app
+    global _extract_entries, _search, _parse_terms, _pickle, _time_mod
+    _, _pickle, _time_mod, _extract_entries, _search, _parse_terms = msg
+
+    splash_frame.destroy()
+    KisSearchApp(root, base_path)
+
 
 def main():
     base = Path(sys.argv[1]) if len(sys.argv) > 1 else _THIS_DIR
+
+    # ── Create window immediately ─────────────────────────────────────────────
     root = tk.Tk()
-    KisSearchApp(root, base)
+    root.title(APP_TITLE)
+    root.geometry(f"{WIN_W}x{WIN_H}")
+    root.minsize(820, 520)
+    root.configure(bg=C_BG)
+
+    # ── Minimal splash while heavy imports run ────────────────────────────────
+    splash = tk.Frame(root, bg=C_BG)
+    splash.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    tk.Label(splash, text=APP_TITLE,
+             bg=C_BG, fg=C_ACCENT,
+             font=("Segoe UI", 13, "bold")).place(relx=0.5, rely=0.38, anchor="center")
+
+    spin_lbl = tk.Label(splash, text=_SPINNER[0],
+                        bg=C_BG, fg=C_ACCENT,
+                        font=("Segoe UI", 26, "bold"))
+    spin_lbl.place(relx=0.5, rely=0.50, anchor="center")
+
+    splash_lbl = tk.Label(splash, text="Загрузка модулей…",
+                          bg=C_BG, fg="#7f849c",
+                          font=("Segoe UI", 10))
+    splash_lbl.place(relx=0.5, rely=0.60, anchor="center")
+
+    # ── Force render so user sees the splash before Python does anything ──────
+    root.update()
+
+    # ── Start heavy imports in background ────────────────────────────────────
+    import_q = queue.Queue()
+    threading.Thread(target=_do_heavy_imports, args=(import_q,),
+                     daemon=True, name="imports").start()
+
+    # ── Poll for import completion ────────────────────────────────────────────
+    root.after(80, lambda: _wait_for_imports(
+        root, base, import_q, splash, splash_lbl, spin_lbl, [0]))
+
     root.mainloop()
 
 

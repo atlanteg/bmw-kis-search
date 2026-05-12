@@ -156,10 +156,13 @@ def _extract_type(data, match_start, sgbm_nr_hex):
     return None
 
 
-def extract_entries(data_path, progress=True):
+def extract_entries(data_path, progress=True, progress_cb=None):
     """
     Full binary scan of KIS.data.  Returns list of entry dicts.
     Each entry: sgbm_nr, major, minor, patch, version, full_id, desc, type.
+
+    progress_cb(float 0..1) — optional callback called ~every 150 ms with
+    the fraction of the file scanned so far.
     """
     path = str(data_path)
     size = os.path.getsize(path)
@@ -170,11 +173,17 @@ def extract_entries(data_path, progress=True):
 
     t0 = time.time()
     entries = []
+    _last_cb = [0.0]
 
     with open(path, "rb") as fh:
         mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
         try:
             for m in _ENTRY_RE.finditer(mm):
+                if progress_cb:
+                    now = time.time()
+                    if now - _last_cb[0] >= 0.15:
+                        progress_cb(m.start() / size)
+                        _last_cb[0] = now
                 sgbm_nr = m.group(1).decode("ascii")
                 major   = m.group(2)[0]
                 minor   = m.group(3)[0]
