@@ -147,6 +147,9 @@ class KisSearchApp:
         self._insert_cancel = False  # signal to stop current chunk loop
         self._insert_after  = None   # after() id for next chunk
 
+        # sequential platform load queue (prevents GIL stampede)
+        self._load_queue: list[Path] = []   # platforms waiting to load
+
         self._setup_style()
         self._build_ui()
         self._find_and_preload()
@@ -474,9 +477,19 @@ class KisSearchApp:
         # ── CRITICAL: force window render NOW before threads start ────────────
         self.root.update()
 
-        for p in found:
-            self._start_load_thread(p)
+        # Load platforms ONE AT A TIME to avoid GIL stampede from parallel
+        # pickle.load() calls — active platform first, rest queued after it.
+        self._load_queue = list(found[1:])   # others wait in queue
+        self._start_load_thread(found[0])    # active platform starts now
         self.root.after(80, self._poll_all)
+
+    def _start_next_queued(self):
+        """Pop the next platform from the load queue and start it."""
+        while self._load_queue:
+            p = self._load_queue.pop(0)
+            if self._db.get(p.name) is None and p.name not in self._loading:
+                self._start_load_thread(p)
+                return
 
     def _start_load_thread(self, plat_path: Path, force: bool = False):
         name = plat_path.name
@@ -532,6 +545,8 @@ class KisSearchApp:
                     _, pname, entries, from_cache, elapsed = msg
                     self._db[pname] = entries
                     self._loading.discard(pname)
+                    # platform finished → start next one from queue
+                    self._start_next_queued()
                     if pname == active:
                         self.entries = entries
                         src = "кэш" if from_cache else f"сканирование {elapsed:.0f}с"
@@ -539,7 +554,7 @@ class KisSearchApp:
                             text=f"{pname}  ·  {len(entries):,} записей  ({src})")
                         self._hide_overlay()
                         self._do_search()
-                        still = len(self._loading)
+                        still = len(self._loading) + len(self._load_queue)
                         st = f"Готово — {len(entries):,} записей  [{pname}]"
                         if still:
                             st += f"  ·  загружается ещё {still} платф. в фоне…"
@@ -554,15 +569,18 @@ class KisSearchApp:
                                          f"Платформа {pname}:\n{err}")
 
         # top-bar indicator
-        still = sorted(self._loading)
-        if still:
+        loading_now = sorted(self._loading)
+        queued      = [p.name for p in self._load_queue]
+        if loading_now or queued:
             spin = _SPINNER[self._spin_idx % len(_SPINNER)]
-            self.lbl_loading_all.config(
-                text=f"{spin} загружается: {', '.join(still)}")
+            parts = []
+            if loading_now: parts.append(f"загружается: {', '.join(loading_now)}")
+            if queued:      parts.append(f"в очереди: {', '.join(queued)}")
+            self.lbl_loading_all.config(text=f"{spin} " + "  ·  ".join(parts))
         else:
             self.lbl_loading_all.config(text="✓ все платформы готовы")
 
-        if self._loading:
+        if self._loading or self._load_queue:
             self.root.after(80, self._poll_all)
 
     # ── Platform switching ────────────────────────────────────────────────────
@@ -591,6 +609,11 @@ class KisSearchApp:
             if not from_pkl:
                 self._scan_start = _time_mod.time()
             self._set_status(f"Загрузка платформы {name}…")
+            # If platform is still in the queue (not yet started), start it now
+            if plat_path in self._load_queue:
+                self._load_queue.remove(plat_path)
+                if name not in self._loading:
+                    self._start_load_thread(plat_path)
             self._wait_for_platform(name)
 
     def _wait_for_platform(self, name: str):
