@@ -57,9 +57,9 @@ COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
 COL_WIDTHS  = (92,          62,     88,         215,        390)
 COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
-# Tkinter Treeview.insert() is ~2–10 ms/row on Windows.
+# Tkinter Treeview.insert() / .delete() is ~2–10 ms/row on Windows.
 # Cap visible rows to keep the UI responsive; the rest are filtered via search.
-MAX_DISPLAY = 300
+MAX_DISPLAY = 100
 
 C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"
 C_BORDER  = "#44445a"; C_FG      = "#cdd6f4"; C_DIM     = "#7f849c"
@@ -146,10 +146,11 @@ class KisSearchApp:
         self._spin_idx   = 0
         self._spin_after = None
 
-        # chunked table insertion state
+        # chunked table delete+insert pipeline state
+        self._delete_job    = None   # dict with pending deletion work
         self._insert_job    = None   # dict with pending insertion work
-        self._insert_cancel = False  # signal to stop current chunk loop
-        self._insert_after  = None   # after() id for next chunk
+        self._insert_cancel = False  # signal to stop current delete+insert pipeline
+        self._insert_after  = None   # after() id for next insert chunk
 
         # async _do_search pipeline: results are queued, applied via after()
         self._queued_results: tuple | None = None   # (results, full_total)
@@ -749,24 +750,52 @@ class KisSearchApp:
         self._flush_after = self.root.after(5, self._flush_results)
 
     def _flush_results(self):
-        """Async: delete old rows then start inserting new ones (runs after event loop tick)."""
+        """Async: start chunked delete pipeline, then insert pipeline."""
         self._flush_after = None
         if self._queued_results is None:
             return
         results, full_total = self._queued_results
         self._queued_results = None
+        self._insert_cancel = False
 
-        # Clear existing rows (synchronous, but we're in an async callback so
-        # Windows already processed the triggering event before we got here)
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
+        old_children = list(self.tree.get_children())
+        if old_children:
+            self._delete_job = {
+                "items":      old_children,
+                "offset":     0,
+                "results":    results,
+                "full_total": full_total,
+            }
+            self.root.after(1, self._delete_chunk)
+        else:
+            self._start_insert_job(results, full_total)
 
+    _DELETE_CHUNK = 30   # rows per delete slice — keeps each slice under ~150 ms
+
+    def _delete_chunk(self):
+        """Delete rows in small batches to avoid blocking the event loop."""
+        if self._insert_cancel or self._delete_job is None:
+            return
+        job    = self._delete_job
+        items  = job["items"]
+        offset = job["offset"]
+        end    = min(offset + self._DELETE_CHUNK, len(items))
+        if offset < end:
+            self.tree.delete(*items[offset:end])
+        job["offset"] = end
+        if end < len(items) and not self._insert_cancel:
+            self.root.after(1, self._delete_chunk)
+        else:
+            results    = job["results"]
+            full_total = job["full_total"]
+            self._delete_job = None
+            if not self._insert_cancel:
+                self._start_insert_job(results, full_total)
+
+    def _start_insert_job(self, results: list, full_total: int):
         if not results:
             return
-
         visible = results[:MAX_DISPLAY]
-        self._insert_cancel = False
         self._insert_job = {
             "results":    visible,
             "offset":     0,
@@ -786,33 +815,30 @@ class KisSearchApp:
     # ── Table ─────────────────────────────────────────────────────────────────
 
     def _clear_table(self):
-        # cancel any in-progress chunk insertion first
         self._insert_cancel = True
         if self._insert_after:
             self.root.after_cancel(self._insert_after)
             self._insert_after = None
         self._insert_job = None
-        self.tree.delete(*self.tree.get_children())
+        self._delete_job = None
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
 
     def _populate_table(self, results: list, full_total: int = 0):
-        self._clear_table()
-        if not results:
-            return
-        self._insert_cancel = False
-        # Cap rows — never insert more than MAX_DISPLAY rows synchronously
-        visible = results[:MAX_DISPLAY]
-        self._insert_job = {
-            "results":    visible,
-            "offset":     0,
-            "prev_nr":    None,
-            "alt":        False,
-            "total":      len(visible),
-            "full_total": full_total or len(results),
-        }
-        # Always async — never block the event loop on the first chunk
-        self._insert_after = self.root.after(1, self._insert_chunk)
+        # Route through the same async delete+insert pipeline as _flush_results
+        self._insert_cancel = True
+        if self._insert_after:
+            self.root.after_cancel(self._insert_after)
+            self._insert_after = None
+        self._insert_job = None
+        self._delete_job = None
+        self._queued_results = (results, full_total or len(results))
+        if self._flush_after:
+            self.root.after_cancel(self._flush_after)
+        self._flush_after = self.root.after(1, self._flush_results)
 
-    _INSERT_CHUNK = 50   # rows per chunk; 50 × ~5 ms = ~250 ms max per slice
+    _INSERT_CHUNK = 20   # rows per chunk; 20 × ~5 ms = ~100 ms max per slice
 
     def _insert_chunk(self):
         if self._insert_cancel or self._insert_job is None:
