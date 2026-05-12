@@ -142,6 +142,11 @@ class KisSearchApp:
         self._spin_idx   = 0
         self._spin_after = None
 
+        # chunked table insertion state
+        self._insert_job    = None   # dict with pending insertion work
+        self._insert_cancel = False  # signal to stop current chunk loop
+        self._insert_after  = None   # after() id for next chunk
+
         self._setup_style()
         self._build_ui()
         self._find_and_preload()
@@ -504,20 +509,26 @@ class KisSearchApp:
         active = self.cb_platform.get()
 
         for name, q in self._queues.items():
-            # drain entire queue for this platform
+            # drain queue; for progress keep only the latest value
+            last_pct  = None
+            non_progress = []
             while True:
                 try:
                     msg = q.get_nowait()
                 except queue.Empty:
                     break
+                if msg[0] == "progress":
+                    last_pct = msg[2]   # overwrite — only last % matters
+                else:
+                    non_progress.append(msg)
 
+            # apply latest progress (if active platform is scanning)
+            if last_pct is not None and name == active and getattr(self, "_scan_mode", False):
+                self._update_progress(last_pct)
+
+            for msg in non_progress:
                 kind = msg[0]
-                if kind == "progress":
-                    _, pname, pct = msg
-                    if pname == active and getattr(self, "_scan_mode", False):
-                        self._update_progress(pct)
-
-                elif kind == "done":
+                if kind == "done":
                     _, pname, entries, from_cache, elapsed = msg
                     self._db[pname] = entries
                     self._loading.discard(pname)
@@ -694,12 +705,42 @@ class KisSearchApp:
     # ── Table ─────────────────────────────────────────────────────────────────
 
     def _clear_table(self):
+        # cancel any in-progress chunk insertion first
+        self._insert_cancel = True
+        if self._insert_after:
+            self.root.after_cancel(self._insert_after)
+            self._insert_after = None
+        self._insert_job = None
         self.tree.delete(*self.tree.get_children())
 
     def _populate_table(self, results: list):
         self._clear_table()
-        prev_nr, alt = None, False
-        for e in results:
+        if not results:
+            return
+        self._insert_cancel = False
+        self._insert_job = {
+            "results": results,
+            "offset":  0,
+            "prev_nr": None,
+            "alt":     False,
+            "total":   len(results),
+        }
+        self._insert_chunk()
+
+    _INSERT_CHUNK = 250   # rows per chunk — keeps each slice < ~30 ms
+
+    def _insert_chunk(self):
+        if self._insert_cancel or self._insert_job is None:
+            return
+        job     = self._insert_job
+        results = job["results"]
+        offset  = job["offset"]
+        end     = min(offset + self._INSERT_CHUNK, job["total"])
+        prev_nr = job["prev_nr"]
+        alt     = job["alt"]
+
+        for i in range(offset, end):
+            e = results[i]
             if e["sgbm_nr"] != prev_nr:
                 if prev_nr is not None:
                     alt = not alt
@@ -709,6 +750,20 @@ class KisSearchApp:
                              values=(e["sgbm_nr"], e["type"], e["version"],
                                      e["full_id"], e["desc"]),
                              tags=(tag,))
+
+        job["offset"]  = end
+        job["prev_nr"] = prev_nr
+        job["alt"]     = alt
+
+        if end < job["total"] and not self._insert_cancel:
+            # show progressive count in status
+            self._set_status(
+                f"Загрузка таблицы…  {end:,} / {job['total']:,}")
+            # yield to event loop, then continue
+            self._insert_after = self.root.after(0, self._insert_chunk)
+        else:
+            self._insert_after = None
+            self._insert_job   = None
 
     def _sort_by(self, col):
         sk = {"full_id": "sgbm_nr"}.get(col, col)
