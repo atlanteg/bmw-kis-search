@@ -176,8 +176,12 @@ def extract_entries(data_path, progress=True, progress_cb=None):
 
     t0         = time.time()
     entries    = []
-    CHUNK      = 8 * 1024 * 1024   # 8 MB — small enough for regular GIL yields
-    OVERLAP    = 30                 # slightly > max match length (23 B)
+    # 512 KB chunks: re.finditer() holds GIL continuously (no Py_BEGIN_ALLOW_THREADS
+    # in CPython's sre engine).  Smaller chunks mean shorter uninterrupted GIL holds
+    # (~10-30 ms each), and time.sleep(0) after EVERY chunk guarantees the GUI
+    # thread gets the GIL back before the next chunk starts.
+    CHUNK      = 512 * 1024
+    OVERLAP    = 30
     pos        = 0
     _last_cb_t = 0.0
 
@@ -188,8 +192,6 @@ def extract_entries(data_path, progress=True, progress_cb=None):
                 seg_start = max(0, pos - OVERLAP)
                 seg_end   = min(pos + CHUNK, size)
 
-                # Convert slice to bytes: re.finditer on bytes releases the GIL
-                # during C-level scanning, keeping the GUI thread alive.
                 chunk = bytes(mm[seg_start:seg_end])
 
                 for m in _ENTRY_RE.finditer(chunk):
@@ -232,13 +234,14 @@ def extract_entries(data_path, progress=True, progress_cb=None):
 
                 pos = seg_end
 
-                # Report progress + yield GIL to event loop every ~150 ms
+                # Yield GIL after every chunk so GUI thread stays alive.
+                # time.sleep(0) calls Py_BEGIN_ALLOW_THREADS + Sleep(0) +
+                # Py_END_ALLOW_THREADS — guaranteed GIL release even for 0 ms.
+                time.sleep(0)
+
                 now = time.time()
-                if now - _last_cb_t >= 0.15:
-                    if progress_cb:
-                        progress_cb(pos / size)
-                    else:
-                        time.sleep(0.001)  # ensure GIL yield even without callback
+                if progress_cb and now - _last_cb_t >= 0.15:
+                    progress_cb(pos / size)
                     _last_cb_t = now
 
         finally:
