@@ -57,6 +57,10 @@ COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
 COL_WIDTHS  = (92,          62,     88,         215,        390)
 COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
+# Tkinter Treeview.insert() is ~2–10 ms/row on Windows.
+# Cap visible rows to keep the UI responsive; the rest are filtered via search.
+MAX_DISPLAY = 300
+
 C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"
 C_BORDER  = "#44445a"; C_FG      = "#cdd6f4"; C_DIM     = "#7f849c"
 C_ACCENT  = "#89b4fa"; C_GREEN   = "#a6e3a1"; C_YELLOW  = "#f9e2af"
@@ -712,9 +716,15 @@ class KisSearchApp:
             "desc":    lambda e: e["desc"].lower(),
         }
         results.sort(key=_keys.get(sort_by, _keys["sgbm_nr"]), reverse=rev)
-        self._populate_table(results)
+        total = len(results)
+        self._populate_table(results, full_total=total)
 
-        parts = [f"{len(results):,} результатов"]
+        shown = min(total, MAX_DISPLAY)
+        parts = []
+        if total > MAX_DISPLAY:
+            parts.append(f"{total:,} результатов  (показано {shown} — уточните поиск)")
+        else:
+            parts.append(f"{total:,} результатов")
         if inc_raw:  parts.append(f"поиск: {inc_raw}")
         if exc_raw:  parts.append(f"исключить: {exc_raw}")
         self._set_status("  ·  ".join(parts))
@@ -736,21 +746,25 @@ class KisSearchApp:
         self._insert_job = None
         self.tree.delete(*self.tree.get_children())
 
-    def _populate_table(self, results: list):
+    def _populate_table(self, results: list, full_total: int = 0):
         self._clear_table()
         if not results:
             return
         self._insert_cancel = False
+        # Cap rows — never insert more than MAX_DISPLAY rows synchronously
+        visible = results[:MAX_DISPLAY]
         self._insert_job = {
-            "results": results,
-            "offset":  0,
-            "prev_nr": None,
-            "alt":     False,
-            "total":   len(results),
+            "results":    visible,
+            "offset":     0,
+            "prev_nr":    None,
+            "alt":        False,
+            "total":      len(visible),
+            "full_total": full_total or len(results),
         }
-        self._insert_chunk()
+        # Always async — never block the event loop on the first chunk
+        self._insert_after = self.root.after(1, self._insert_chunk)
 
-    _INSERT_CHUNK = 250   # rows per chunk — keeps each slice < ~30 ms
+    _INSERT_CHUNK = 50   # rows per chunk; 50 × ~5 ms = ~250 ms max per slice
 
     def _insert_chunk(self):
         if self._insert_cancel or self._insert_job is None:
@@ -779,11 +793,7 @@ class KisSearchApp:
         job["alt"]     = alt
 
         if end < job["total"] and not self._insert_cancel:
-            # show progressive count in status
-            self._set_status(
-                f"Загрузка таблицы…  {end:,} / {job['total']:,}")
-            # yield to event loop, then continue
-            self._insert_after = self.root.after(0, self._insert_chunk)
+            self._insert_after = self.root.after(1, self._insert_chunk)
         else:
             self._insert_after = None
             self._insert_job   = None
