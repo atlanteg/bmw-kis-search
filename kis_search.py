@@ -163,6 +163,9 @@ def extract_entries(data_path, progress=True, progress_cb=None):
 
     progress_cb(float 0..1) — optional callback called ~every 150 ms with
     the fraction of the file scanned so far.
+
+    Scans in 8 MB byte-chunks so the C regex engine releases the GIL between
+    chunks — keeps the GUI event loop alive during a multi-minute first scan.
     """
     path = str(data_path)
     size = os.path.getsize(path)
@@ -171,56 +174,73 @@ def extract_entries(data_path, progress=True, progress_cb=None):
         print(_c(f"Scanning {path}  ({size / 1024**3:.2f} GB) …", D, YL),
               file=sys.stderr)
 
-    t0 = time.time()
-    entries = []
-    _last_cb = [0.0]
+    t0         = time.time()
+    entries    = []
+    CHUNK      = 8 * 1024 * 1024   # 8 MB — small enough for regular GIL yields
+    OVERLAP    = 30                 # slightly > max match length (23 B)
+    pos        = 0
+    _last_cb_t = 0.0
 
     with open(path, "rb") as fh:
         mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
         try:
-            for m in _ENTRY_RE.finditer(mm):
-                if progress_cb:
-                    now = time.time()
-                    if now - _last_cb[0] >= 0.15:
-                        progress_cb(m.start() / size)
-                        _last_cb[0] = now
-                sgbm_nr = m.group(1).decode("ascii")
-                major   = m.group(2)[0]
-                minor   = m.group(3)[0]
-                patch   = m.group(4)[0]
+            while pos < size:
+                seg_start = max(0, pos - OVERLAP)
+                seg_end   = min(pos + CHUNK, size)
 
-                # Version sanity guard
-                if major > 999 or minor > 999 or patch > 9999:
-                    continue
+                # Convert slice to bytes: re.finditer on bytes releases the GIL
+                # during C-level scanning, keeping the GUI thread alive.
+                chunk = bytes(mm[seg_start:seg_end])
 
-                # Skip 5× CHAR(1) fields (GUELTIG_IM_SERVICE … LAESST_FLASHEN_ZU)
-                p = m.end()
-                for _ in range(5):
-                    np = _skip_char1(mm, p)
-                    if np == p:
-                        break
-                    p = np
+                for m in _ENTRY_RE.finditer(chunk):
+                    abs_start = seg_start + m.start()
+                    if abs_start < pos:
+                        continue   # overlap region — already processed
 
-                # BESCHREIBUNG (VARCHAR 1024)
-                desc, _ = _read_varchar(mm, p)
+                    sgbm_nr = m.group(1).decode("ascii")
+                    major   = m.group(2)[0]
+                    minor   = m.group(3)[0]
+                    patch   = m.group(4)[0]
 
-                # Reject obvious garbage: description should be printable ASCII/latin
-                if desc and not all(0x20 <= ord(c) < 0x100 for c in desc):
-                    desc = ""
+                    if major > 999 or minor > 999 or patch > 9999:
+                        continue
 
-                tcode = _extract_type(mm, m.start(), sgbm_nr)
-                tname = _type_name(tcode)
+                    # Skip 5× CHAR(1) fields (absolute position in full mmap)
+                    p = seg_start + m.end()
+                    for _ in range(5):
+                        np = _skip_char1(mm, p)
+                        if np == p:
+                            break
+                        p = np
 
-                entries.append({
-                    "sgbm_nr": sgbm_nr,
-                    "major":   major,
-                    "minor":   minor,
-                    "patch":   patch,
-                    "version": f"{major}.{minor}.{patch}",
-                    "full_id": f"{sgbm_nr}_{major:03d}_{minor:03d}_{patch:03d}",
-                    "desc":    desc,
-                    "type":    tname,
-                })
+                    desc, _ = _read_varchar(mm, p)
+                    if desc and not all(0x20 <= ord(c) < 0x100 for c in desc):
+                        desc = ""
+
+                    tcode = _extract_type(mm, abs_start, sgbm_nr)
+
+                    entries.append({
+                        "sgbm_nr": sgbm_nr,
+                        "major":   major,
+                        "minor":   minor,
+                        "patch":   patch,
+                        "version": f"{major}.{minor}.{patch}",
+                        "full_id": f"{sgbm_nr}_{major:03d}_{minor:03d}_{patch:03d}",
+                        "desc":    desc,
+                        "type":    _type_name(tcode),
+                    })
+
+                pos = seg_end
+
+                # Report progress + yield GIL to event loop every ~150 ms
+                now = time.time()
+                if now - _last_cb_t >= 0.15:
+                    if progress_cb:
+                        progress_cb(pos / size)
+                    else:
+                        time.sleep(0.001)  # ensure GIL yield even without callback
+                    _last_cb_t = now
+
         finally:
             mm.close()
 
