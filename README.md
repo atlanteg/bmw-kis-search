@@ -62,16 +62,20 @@ python kis_search_gui.py
 python kis_search_gui.py  C:\path\to\databases
 ```
 
+**Default database path (Windows):** `C:\data\kiswb`  
+If that folder doesn't exist or contains no `KIS.data` files, a **Browse…** button appears so you can select any folder.
+
 **Features:**
 - Auto-detects all platform folders containing `KIS.data`
-- All platforms preloaded in parallel at startup — switching is instant
-- Fast binary cache (`.kis_gui_cache.pkl`) — first scan ~1 min, subsequent starts < 1 sec
-- Animated loading overlay (app stays responsive during scan)
+- Platforms preloaded sequentially at startup — switching is instant once loaded
+- Chunked binary cache (`.kis_cache/`) — first scan ~1 min, subsequent starts < 1 sec
+- Animated loading overlay (app stays fully responsive during any operation)
 - OR search via `|` in the search field: `EQ ALEV4 | EQ ALEV3`
 - Exclusion field for negative filters
 - Type filter dropdown (SWFK, CAFD, BTLD, HWEL, …)
 - Double-click / Ctrl+C to copy Full ID
 - Right-click context menu with TSV export
+- **Browse…** button to switch database folder at any time
 
 ---
 

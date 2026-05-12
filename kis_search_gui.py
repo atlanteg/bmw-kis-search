@@ -44,11 +44,10 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 APP_TITLE   = "BMW KIS Search  ·  by NBTboost creators © Atlanteg"
-WIN_W, WIN_H = 1150, 700
+WIN_W, WIN_H = 1150, 720
 FONT_UI     = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
 FONT_BOLD   = ("Segoe UI", 9, "bold")
-FONT_BIG    = ("Segoe UI", 11)
 FONT_HUGE   = ("Segoe UI", 18, "bold")
 TYPES       = ["All", "SWFK", "CAFD", "BTLD", "HWEL", "FLSL", "ENTD", "HWAP", "SWFL"]
 SORT_OPTS   = ["sgbm_nr", "type", "version", "desc"]
@@ -57,9 +56,21 @@ COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
 COL_WIDTHS  = (92,          62,     88,         215,        390)
 COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
-# Tkinter Treeview.insert() / .delete() is ~2–10 ms/row on Windows.
-# Cap visible rows to keep the UI responsive; the rest are filtered via search.
-MAX_DISPLAY = 100
+# Each Treeview insert/delete call on Windows takes 2–10 ms.
+# Limit visible rows; chunk inserts/deletes to never block > ~100 ms at once.
+MAX_DISPLAY   = 100
+_INS_CHUNK    = 20    # rows per insert slice
+_DEL_CHUNK    = 25    # rows per delete slice
+
+# Default DB root on Windows.  Falls back to script dir or Browse.
+_DEFAULT_DB_WIN = Path(r"C:\data\kiswb")
+
+# Chunked pickle cache — each chunk holds this many entries.
+# Loading one chunk holds the GIL for ~5-20 ms; time.sleep(0) between
+# chunks releases the GIL so Tkinter's message pump stays alive.
+_CACHE_CHUNK   = 2000
+_CACHE_VERSION = 2
+_CACHE_SUBDIR  = ".kis_cache"
 
 C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"
 C_BORDER  = "#44445a"; C_FG      = "#cdd6f4"; C_DIM     = "#7f849c"
@@ -77,10 +88,8 @@ _THIS_DIR = Path(__file__).parent
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 2 — heavy imports happen in a background thread AFTER window is shown
+# STAGE 2 — heavy imports in background thread AFTER window is shown
 # ══════════════════════════════════════════════════════════════════════════════
-
-# These are filled in by the import thread and then used by the app
 _extract_entries = None
 _search          = None
 _parse_terms     = None
@@ -89,40 +98,84 @@ _time_mod        = None
 
 
 def _do_heavy_imports(result_q: queue.Queue):
-    """Run in a thread: import everything not needed for first render."""
     try:
         import pickle as _pk
         import time   as _tm
         sys.path.insert(0, str(_THIS_DIR))
         from kis_search import extract_entries, search, _parse_terms as pt
-        result_q.put(("imports_ok", _pk, _tm, extract_entries, search, pt))
+        result_q.put(("ok", _pk, _tm, extract_entries, search, pt))
     except Exception as e:
-        result_q.put(("imports_err", str(e)))
+        result_q.put(("err", str(e)))
 
 
-# ── Fast pickle cache (per platform) ─────────────────────────────────────────
+# ── Chunked pickle cache ──────────────────────────────────────────────────────
+# Saves entries as many small .pkl files so that loading yields the GIL
+# between chunks (via time.sleep(0)), keeping Tkinter's event loop alive.
 
-def _pkl_path(db_path: Path) -> Path:
-    return db_path.parent / ".kis_gui_cache.pkl"
+def _cache_dir(db_path: Path) -> Path:
+    return db_path.parent / _CACHE_SUBDIR
+
+def _cache_meta(db_path: Path) -> Path:
+    return _cache_dir(db_path) / "meta.pkl"
 
 
 def _load_fast_cache(db_path: Path):
-    pkl = _pkl_path(db_path)
-    try:
-        if pkl.exists() and pkl.stat().st_mtime >= db_path.stat().st_mtime:
-            with open(pkl, "rb") as f:
-                return _pickle.load(f)
-    except Exception:
-        pass
+    """Load chunked cache; yields GIL between chunks. Returns list or None."""
+    meta_path = _cache_meta(db_path)
+
+    # ── New chunked format ────────────────────────────────────────────────────
+    if meta_path.exists():
+        try:
+            with open(meta_path, "rb") as f:
+                meta = _pickle.load(f)
+            if (meta.get("v") == _CACHE_VERSION and
+                    meta.get("mtime", 0) >= db_path.stat().st_mtime):
+                cdir    = meta_path.parent
+                entries = []
+                for i in range(meta["chunks"]):
+                    with open(cdir / f"c{i:05d}.pkl", "rb") as f:
+                        entries.extend(_pickle.load(f))
+                    _time_mod.sleep(0)   # ← release GIL between every chunk
+                if len(entries) == meta["count"]:
+                    return entries
+        except Exception:
+            pass
+
+    # ── Migrate old single-file format (.kis_gui_cache.pkl) ──────────────────
+    old = db_path.parent / ".kis_gui_cache.pkl"
+    if old.exists():
+        try:
+            if old.stat().st_mtime >= db_path.stat().st_mtime:
+                with open(old, "rb") as f:
+                    entries = _pickle.load(f)   # one-time GIL hold for migration
+                _save_fast_cache(db_path, entries)
+                return entries
+        except Exception:
+            pass
+
     return None
 
 
 def _save_fast_cache(db_path: Path, entries: list):
     try:
-        with open(_pkl_path(db_path), "wb") as f:
-            _pickle.dump(entries, f, protocol=_pickle.HIGHEST_PROTOCOL)
+        cdir = _cache_dir(db_path)
+        cdir.mkdir(exist_ok=True)
+        n_chunks = 0
+        for i in range(0, len(entries), _CACHE_CHUNK):
+            with open(cdir / f"c{n_chunks:05d}.pkl", "wb") as f:
+                _pickle.dump(entries[i : i + _CACHE_CHUNK], f,
+                             protocol=_pickle.HIGHEST_PROTOCOL)
+            n_chunks += 1
+        meta = {
+            "v":      _CACHE_VERSION,
+            "mtime":  db_path.stat().st_mtime,
+            "count":  len(entries),
+            "chunks": n_chunks,
+        }
+        with open(_cache_meta(db_path), "wb") as f:
+            _pickle.dump(meta, f, protocol=_pickle.HIGHEST_PROTOCOL)
     except Exception as e:
-        print(f"Warning: could not save GUI cache: {e}")
+        print(f"Warning: cache save failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -134,10 +187,10 @@ class KisSearchApp:
         self.root      = root
         self.base_path = base_path
 
-        self.platforms: list[Path] = []
-        self._db     : dict[str, list | None] = {}
-        self._loading: set[str]  = set()
-        self._queues : dict[str, queue.Queue] = {}
+        self.platforms : list[Path]            = []
+        self._db       : dict[str, list | None] = {}
+        self._loading  : set[str]              = set()
+        self._queues   : dict[str, queue.Queue] = {}
 
         self.entries    : list = []
         self._sort_col   = "sgbm_nr"
@@ -145,19 +198,21 @@ class KisSearchApp:
         self._debounce   = None
         self._spin_idx   = 0
         self._spin_after = None
+        self._scan_mode  = False
+        self._scan_start : float = 0.0
 
-        # chunked table delete+insert pipeline state
-        self._delete_job    = None   # dict with pending deletion work
-        self._insert_job    = None   # dict with pending insertion work
-        self._insert_cancel = False  # signal to stop current delete+insert pipeline
-        self._insert_after  = None   # after() id for next insert chunk
+        # async delete → insert pipeline
+        self._pipeline_cancel = False
+        self._delete_job  = None
+        self._insert_job  = None
+        self._step_after  = None   # single after() id shared by delete/insert
 
-        # async _do_search pipeline: results are queued, applied via after()
-        self._queued_results: tuple | None = None   # (results, full_total)
-        self._flush_after:    str | None   = None   # after() id for _flush
+        # async search queue (latest result wins)
+        self._queued_results : tuple | None = None
+        self._flush_after    : str | None   = None
 
-        # sequential platform load queue (prevents GIL stampede)
-        self._load_queue: list[Path] = []   # platforms waiting to load
+        # sequential platform load queue (one at a time → no GIL stampede)
+        self._load_queue : list[Path] = []
 
         self._setup_style()
         self._build_ui()
@@ -168,7 +223,7 @@ class KisSearchApp:
     def _setup_style(self):
         self.root.title(APP_TITLE)
         self.root.geometry(f"{WIN_W}x{WIN_H}")
-        self.root.minsize(820, 520)
+        self.root.minsize(820, 540)
         self.root.configure(bg=C_BG)
 
         s = ttk.Style()
@@ -231,11 +286,12 @@ class KisSearchApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
 
-        # Top bar
+        # ── Top bar (platform + DB path) ──────────────────────────────────────
         top = ttk.Frame(self.root, style="P.TFrame", padding=(12, 8))
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(3, weight=1)
 
+        # Row 0: platform selector
         ttk.Label(top, text="Платформа:", style="P.TLabel").grid(
             row=0, column=0, padx=(0, 6))
         self.var_platform = tk.StringVar()
@@ -257,7 +313,18 @@ class KisSearchApp:
                                          background=C_PANEL, foreground=C_ACCENT)
         self.lbl_loading_all.grid(row=0, column=4, sticky="e", padx=(10, 0))
 
-        # Search controls
+        # Row 1: database path + Browse button
+        ttk.Label(top, text="База данных:", style="PD.TLabel").grid(
+            row=1, column=0, padx=(0, 6), pady=(6, 0))
+        self.lbl_db_path = ttk.Label(top, text=str(self.base_path),
+                                     style="PD.TLabel", background=C_PANEL)
+        self.lbl_db_path.grid(row=1, column=1, columnspan=3, sticky="w",
+                              pady=(6, 0))
+        ttk.Button(top, text="📁 Browse…", style="Sm.TButton",
+                   command=self._browse_db).grid(row=1, column=4, pady=(6, 0),
+                                                 sticky="e", padx=(10, 0))
+
+        # ── Search controls ───────────────────────────────────────────────────
         sf = ttk.Frame(self.root, padding=(12, 8, 12, 4))
         sf.grid(row=1, column=0, sticky="ew")
         sf.columnconfigure(1, weight=1)
@@ -301,7 +368,7 @@ class KisSearchApp:
         ttk.Button(sf, text="✕ Очистить", style="Sm.TButton",
                    command=self._clear).grid(row=1, column=4, pady=(5, 0))
 
-        # Results area + overlay
+        # ── Results area + loading overlay ───────────────────────────────────
         self.rf = ttk.Frame(self.root)
         self.rf.grid(row=2, column=0, sticky="nsew", padx=10, pady=(4, 0))
         self.rf.columnconfigure(0, weight=1)
@@ -336,36 +403,47 @@ class KisSearchApp:
 
         self.lbl_spin = tk.Label(self.overlay, text="", bg=C_OVERLAY,
                                  fg=C_ACCENT, font=("Segoe UI", 26, "bold"))
-        self.lbl_spin.place(relx=0.5, rely=0.32, anchor="center")
+        self.lbl_spin.place(relx=0.5, rely=0.30, anchor="center")
 
         self.lbl_load_title = tk.Label(self.overlay, text="",
                                        bg=C_OVERLAY, fg=C_FG,
                                        font=("Segoe UI", 15, "bold"))
-        self.lbl_load_title.place(relx=0.5, rely=0.44, anchor="center")
+        self.lbl_load_title.place(relx=0.5, rely=0.42, anchor="center")
 
         self.lbl_load_sub = tk.Label(self.overlay, text="",
                                      bg=C_OVERLAY, fg=C_DIM,
                                      font=("Segoe UI", 10))
-        self.lbl_load_sub.place(relx=0.5, rely=0.53, anchor="center")
+        self.lbl_load_sub.place(relx=0.5, rely=0.51, anchor="center")
 
-        # determinate progress bar (shows % when scanning; hidden while from cache)
         self.pbar_det = ttk.Progressbar(
             self.overlay, style="Det.Horizontal.TProgressbar",
             mode="determinate", length=360, maximum=100)
-        self.pbar_det.place(relx=0.5, rely=0.62, anchor="center")
+        self.pbar_det.place(relx=0.5, rely=0.61, anchor="center")
 
-        # indeterminate bar (cache load / short waits)
         self.pbar_ind = ttk.Progressbar(
             self.overlay, style="Ind.Horizontal.TProgressbar",
             mode="indeterminate", length=360)
-        self.pbar_ind.place(relx=0.5, rely=0.62, anchor="center")
+        self.pbar_ind.place(relx=0.5, rely=0.61, anchor="center")
 
         self.lbl_load_pct = tk.Label(self.overlay, text="",
                                      bg=C_OVERLAY, fg=C_ACCENT,
                                      font=("Segoe UI", 9))
-        self.lbl_load_pct.place(relx=0.5, rely=0.70, anchor="center")
+        self.lbl_load_pct.place(relx=0.5, rely=0.69, anchor="center")
 
-        # Status bar
+        # ── No-database panel (shown when no KIS.data found) ─────────────────
+        self.no_db_frame = tk.Frame(self.rf, bg=C_OVERLAY)
+        tk.Label(self.no_db_frame,
+                 text="KIS.data не найден",
+                 bg=C_OVERLAY, fg=C_FG,
+                 font=("Segoe UI", 16, "bold")).pack(pady=(80, 8))
+        self._lbl_no_db_path = tk.Label(self.no_db_frame, text="",
+                                        bg=C_OVERLAY, fg=C_DIM,
+                                        font=("Segoe UI", 10))
+        self._lbl_no_db_path.pack(pady=(0, 20))
+        ttk.Button(self.no_db_frame, text="📁  Выбрать папку с базами данных",
+                   command=self._browse_db).pack()
+
+        # ── Status bar ───────────────────────────────────────────────────────
         sb = ttk.Frame(self.root, padding=(12, 4))
         sb.grid(row=3, column=0, sticky="ew")
         sb.columnconfigure(0, weight=1)
@@ -375,7 +453,7 @@ class KisSearchApp:
         ttk.Label(sb, text="ДвойнойКлик / Ctrl+C → копировать Full ID",
                   style="Dim.TLabel").grid(row=0, column=1, sticky="e")
 
-        # Context menu
+        # ── Context menu ─────────────────────────────────────────────────────
         self._ctx = tk.Menu(self.root, tearoff=False,
                             bg=C_PANEL, fg=C_FG,
                             activebackground=C_ACCENT, activeforeground=C_BG,
@@ -389,23 +467,20 @@ class KisSearchApp:
     # ── Overlay ───────────────────────────────────────────────────────────────
 
     def _show_overlay(self, title: str, sub: str = "", scan_mode: bool = False):
-        """Display loading overlay.
-        scan_mode=True  → show determinate % bar (for binary scan).
-        scan_mode=False → show indeterminate bar (for cache load).
-        """
         self.lbl_load_title.config(text=title)
         self.lbl_load_sub.config(text=sub)
         self.lbl_load_pct.config(text="")
         self._scan_mode = scan_mode
+        self.no_db_frame.place_forget()
 
         if scan_mode:
             self.pbar_ind.stop()
             self.pbar_ind.place_forget()
             self.pbar_det["value"] = 0
-            self.pbar_det.place(relx=0.5, rely=0.62, anchor="center")
+            self.pbar_det.place(relx=0.5, rely=0.61, anchor="center")
         else:
             self.pbar_det.place_forget()
-            self.pbar_ind.place(relx=0.5, rely=0.62, anchor="center")
+            self.pbar_ind.place(relx=0.5, rely=0.61, anchor="center")
             self.pbar_ind.start(14)
 
         self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -421,6 +496,15 @@ class KisSearchApp:
         self.pbar_ind.stop()
         self.overlay.place_forget()
 
+    def _show_no_db(self, path: Path):
+        self._hide_overlay()
+        self._lbl_no_db_path.config(text=f"Путь: {path}")
+        self.no_db_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.no_db_frame.lift()
+
+    def _hide_no_db(self):
+        self.no_db_frame.place_forget()
+
     def _animate_spin(self):
         frame = _SPINNER[self._spin_idx % len(_SPINNER)]
         self.lbl_spin.config(text=frame)
@@ -428,23 +512,59 @@ class KisSearchApp:
         self._spin_after = self.root.after(100, self._animate_spin)
 
     def _update_progress(self, pct: float):
-        """Called from _poll_all when a 'progress' message arrives (scan mode)."""
         self.pbar_det["value"] = pct * 100
-        self.lbl_load_pct.config(text=f"{pct * 100:.0f}%  ·  "
-                                      f"осталось ~{self._eta_str(pct)}")
-
-    # small helper: very rough ETA
-    _scan_start: float = 0.0
+        self.lbl_load_pct.config(
+            text=f"{pct * 100:.0f}%  ·  осталось ~{self._eta_str(pct)}")
 
     def _eta_str(self, pct: float) -> str:
         if pct <= 0.01 or not self._scan_start:
             return "…"
         elapsed = _time_mod.time() - self._scan_start
-        total   = elapsed / pct
-        rem     = total - elapsed
-        if rem < 60:
-            return f"{rem:.0f} с"
-        return f"{rem / 60:.1f} мин"
+        rem = (elapsed / pct) - elapsed
+        return f"{rem:.0f} с" if rem < 60 else f"{rem / 60:.1f} мин"
+
+    # ── Database path / Browse ────────────────────────────────────────────────
+
+    def _browse_db(self):
+        from tkinter import filedialog
+        folder = filedialog.askdirectory(
+            title="Выбрать папку с базами данных KIS",
+            initialdir=str(self.base_path),
+        )
+        if folder:
+            self._load_from_path(Path(folder))
+
+    def _load_from_path(self, new_path: Path):
+        # Stop all background activity
+        self._pipeline_cancel = True
+        if self._step_after:
+            self.root.after_cancel(self._step_after)
+            self._step_after = None
+        self._delete_job = None
+        self._insert_job = None
+        self._queued_results = None
+        if self._flush_after:
+            self.root.after_cancel(self._flush_after)
+            self._flush_after = None
+
+        # Reset state
+        self.base_path = new_path
+        self.platforms = []
+        self._db       = {}
+        self._loading  = set()
+        self._queues   = {}
+        self._load_queue = []
+        self.entries   = []
+        self.cb_platform["values"] = []
+        self.var_platform.set("")
+        self.lbl_plat_info.config(text="")
+        self.lbl_db_path.config(text=str(new_path))
+        self._cancel_pipeline()
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+
+        self._find_and_preload()
 
     # ── Platform detection & preloading ──────────────────────────────────────
 
@@ -458,42 +578,39 @@ class KisSearchApp:
         if (base / "KIS.data").exists() and base not in found:
             found.insert(0, base)
 
-        self.platforms         = found
-        names                  = [p.name for p in found]
-        self.cb_platform["values"] = names
+        self.platforms             = found
+        self.cb_platform["values"] = [p.name for p in found]
+        self.lbl_db_path.config(text=str(base))
 
         if not found:
-            self._set_status("KIS.data не найден.  "
-                             "Разместите скрипт рядом с папками платформ.")
+            self._show_no_db(base)
+            self._set_status(f"KIS.data не найден в  {base}")
             return
 
+        self._hide_no_db()
         for p in found:
             self._db[p.name]     = None
             self._queues[p.name] = queue.Queue()
 
         self.cb_platform.current(0)
         first    = found[0]
-        from_pkl = _pkl_path(first / "KIS.data").exists()
+        from_pkl = _cache_meta(first / "KIS.data").exists() or \
+                   (first / ".kis_gui_cache.pkl").exists()
         self._show_overlay(
-            f"Загрузка базы данных  {first.name}",
-            "Загрузка из кэша…" if from_pkl
-            else "Первый запуск — сканирование ~1 мин…",
+            f"Загрузка  {first.name}",
+            "Загрузка из кэша…" if from_pkl else "Первый запуск — сканирование ~1 мин…",
             scan_mode=not from_pkl,
         )
         if not from_pkl:
             self._scan_start = _time_mod.time()
 
-        # ── CRITICAL: force window render NOW before threads start ────────────
-        self.root.update()
+        self.root.update()   # render overlay before threads start
 
-        # Load platforms ONE AT A TIME to avoid GIL stampede from parallel
-        # pickle.load() calls — active platform first, rest queued after it.
-        self._load_queue = list(found[1:])   # others wait in queue
-        self._start_load_thread(found[0])    # active platform starts now
+        self._load_queue = list(found[1:])
+        self._start_load_thread(found[0])
         self.root.after(80, self._poll_all)
 
     def _start_next_queued(self):
-        """Pop the next platform from the load queue and start it."""
         while self._load_queue:
             p = self._load_queue.pop(0)
             if self._db.get(p.name) is None and p.name not in self._loading:
@@ -530,9 +647,8 @@ class KisSearchApp:
     def _poll_all(self):
         active = self.cb_platform.get()
 
-        for name, q in self._queues.items():
-            # drain queue; for progress keep only the latest value
-            last_pct  = None
+        for name, q in list(self._queues.items()):
+            last_pct     = None
             non_progress = []
             while True:
                 try:
@@ -540,12 +656,11 @@ class KisSearchApp:
                 except queue.Empty:
                     break
                 if msg[0] == "progress":
-                    last_pct = msg[2]   # overwrite — only last % matters
+                    last_pct = msg[2]
                 else:
                     non_progress.append(msg)
 
-            # apply latest progress (if active platform is scanning)
-            if last_pct is not None and name == active and getattr(self, "_scan_mode", False):
+            if last_pct is not None and name == active and self._scan_mode:
                 self._update_progress(last_pct)
 
             for msg in non_progress:
@@ -554,7 +669,6 @@ class KisSearchApp:
                     _, pname, entries, from_cache, elapsed = msg
                     self._db[pname] = entries
                     self._loading.discard(pname)
-                    # platform finished → start next one from queue
                     self._start_next_queued()
                     if pname == active:
                         self.entries = entries
@@ -577,11 +691,10 @@ class KisSearchApp:
                     messagebox.showerror("Ошибка загрузки",
                                          f"Платформа {pname}:\n{err}")
 
-        # top-bar indicator
         loading_now = sorted(self._loading)
         queued      = [p.name for p in self._load_queue]
         if loading_now or queued:
-            spin = _SPINNER[self._spin_idx % len(_SPINNER)]
+            spin  = _SPINNER[self._spin_idx % len(_SPINNER)]
             parts = []
             if loading_now: parts.append(f"загружается: {', '.join(loading_now)}")
             if queued:      parts.append(f"в очереди: {', '.join(queued)}")
@@ -600,29 +713,28 @@ class KisSearchApp:
 
         if entries is not None:
             self.entries = entries
-            n = len(entries)
-            self.lbl_plat_info.config(text=f"{name}  ·  {n:,} записей")
+            self.lbl_plat_info.config(
+                text=f"{name}  ·  {len(entries):,} записей")
             self._do_search()
-            self._set_status(f"Платформа: {name}  ·  {n:,} записей")
+            self._set_status(f"Платформа: {name}  ·  {len(entries):,} записей")
         else:
             self.entries = []
-            self._clear_table()
+            self._cancel_pipeline()
             plat_path = next(p for p in self.platforms if p.name == name)
-            from_pkl  = _pkl_path(plat_path / "KIS.data").exists()
+            from_pkl  = _cache_meta(plat_path / "KIS.data").exists() or \
+                        (plat_path / ".kis_gui_cache.pkl").exists()
             self._show_overlay(
                 f"Загрузка  {name}",
-                "Загрузка из кэша…" if from_pkl
-                else "Первый запуск — сканирование ~1 мин…",
+                "Загрузка из кэша…" if from_pkl else "Первый запуск — сканирование…",
                 scan_mode=not from_pkl,
             )
             if not from_pkl:
                 self._scan_start = _time_mod.time()
             self._set_status(f"Загрузка платформы {name}…")
-            # If platform is still in the queue (not yet started), start it now
             if plat_path in self._load_queue:
                 self._load_queue.remove(plat_path)
-                if name not in self._loading:
-                    self._start_load_thread(plat_path)
+            if name not in self._loading:
+                self._start_load_thread(plat_path)
             self._wait_for_platform(name)
 
     def _wait_for_platform(self, name: str):
@@ -640,12 +752,10 @@ class KisSearchApp:
         if q:
             try:
                 msg = q.get_nowait()
-                kind = msg[0]
-                if kind == "progress":
-                    _, pname, pct = msg
-                    if pname == name and getattr(self, "_scan_mode", False):
-                        self._update_progress(pct)
-                elif kind == "done":
+                if msg[0] == "progress":
+                    if msg[1] == name and self._scan_mode:
+                        self._update_progress(msg[2])
+                elif msg[0] == "done":
                     _, pname, loaded, from_cache, elapsed = msg
                     self._db[pname] = loaded
                     self._loading.discard(pname)
@@ -659,7 +769,7 @@ class KisSearchApp:
                         self._set_status(
                             f"Платформа: {name}  ·  {len(loaded):,} записей")
                         return
-                elif kind == "error":
+                elif msg[0] == "error":
                     _, pname, err = msg
                     self._db[pname] = []
                     self._loading.discard(pname)
@@ -682,7 +792,10 @@ class KisSearchApp:
         self._loading.add(name)
         self._queues[name] = queue.Queue()
         self.entries = []
-        self._clear_table()
+        self._cancel_pipeline()
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
         self._show_overlay(f"Пересканирование  {name}",
                            "Повторное считывание базы данных…",
                            scan_mode=True)
@@ -696,7 +809,7 @@ class KisSearchApp:
     def _on_key(self, _event=None):
         if self._debounce:
             self.root.after_cancel(self._debounce)
-        self._debounce = self.root.after(320, self._do_search)
+        self._debounce = self.root.after(300, self._do_search)
 
     def _do_search(self):
         """Compute results instantly; schedule the slow tree update asynchronously."""
@@ -724,39 +837,35 @@ class KisSearchApp:
         results.sort(key=_keys.get(sort_by, _keys["sgbm_nr"]), reverse=rev)
         total = len(results)
 
-        # ── Update status bar INSTANTLY (user sees click response right away) ─
         shown = min(total, MAX_DISPLAY)
         parts = []
         if total > MAX_DISPLAY:
             parts.append(f"{total:,} результатов  (показано {shown} — уточните поиск)")
         else:
             parts.append(f"{total:,} результатов")
-        if inc_raw:  parts.append(f"поиск: {inc_raw}")
-        if exc_raw:  parts.append(f"исключить: {exc_raw}")
+        if inc_raw: parts.append(f"поиск: {inc_raw}")
+        if exc_raw: parts.append(f"исключить: {exc_raw}")
         self._set_status("  ·  ".join(parts))
 
-        # ── Queue the table update — never block the event loop ───────────────
+        # Latest result wins — cancel any pending flush and in-flight pipeline
         self._queued_results = (results, total)
-        # Cancel previous pending flush (only latest result matters)
         if self._flush_after:
             self.root.after_cancel(self._flush_after)
-        # Also cancel any in-progress chunked insert
-        self._insert_cancel = True
-        if self._insert_after:
-            self.root.after_cancel(self._insert_after)
-            self._insert_after = None
+        self._pipeline_cancel = True
+        if self._step_after:
+            self.root.after_cancel(self._step_after)
+            self._step_after = None
+        self._delete_job = None
         self._insert_job = None
-        # Schedule the actual delete+insert after returning to event loop
         self._flush_after = self.root.after(5, self._flush_results)
 
     def _flush_results(self):
-        """Async: start chunked delete pipeline, then insert pipeline."""
         self._flush_after = None
         if self._queued_results is None:
             return
         results, full_total = self._queued_results
         self._queued_results = None
-        self._insert_cancel = False
+        self._pipeline_cancel = False
 
         old_children = list(self.tree.get_children())
         if old_children:
@@ -766,33 +875,35 @@ class KisSearchApp:
                 "results":    results,
                 "full_total": full_total,
             }
-            self.root.after(1, self._delete_chunk)
+            self._step_after = self.root.after(1, self._delete_chunk)
         else:
-            self._start_insert_job(results, full_total)
+            self._begin_insert(results, full_total)
 
-    _DELETE_CHUNK = 30   # rows per delete slice — keeps each slice under ~150 ms
+    # ── Async delete pipeline ─────────────────────────────────────────────────
 
     def _delete_chunk(self):
-        """Delete rows in small batches to avoid blocking the event loop."""
-        if self._insert_cancel or self._delete_job is None:
+        if self._pipeline_cancel or self._delete_job is None:
             return
         job    = self._delete_job
         items  = job["items"]
         offset = job["offset"]
-        end    = min(offset + self._DELETE_CHUNK, len(items))
+        end    = min(offset + _DEL_CHUNK, len(items))
         if offset < end:
             self.tree.delete(*items[offset:end])
         job["offset"] = end
-        if end < len(items) and not self._insert_cancel:
-            self.root.after(1, self._delete_chunk)
+        if end < len(items) and not self._pipeline_cancel:
+            self._step_after = self.root.after(1, self._delete_chunk)
         else:
             results    = job["results"]
             full_total = job["full_total"]
-            self._delete_job = None
-            if not self._insert_cancel:
-                self._start_insert_job(results, full_total)
+            self._delete_job  = None
+            self._step_after  = None
+            if not self._pipeline_cancel:
+                self._begin_insert(results, full_total)
 
-    def _start_insert_job(self, results: list, full_total: int):
+    # ── Async insert pipeline ─────────────────────────────────────────────────
+
+    def _begin_insert(self, results: list, full_total: int):
         if not results:
             return
         visible = results[:MAX_DISPLAY]
@@ -804,49 +915,15 @@ class KisSearchApp:
             "total":      len(visible),
             "full_total": full_total,
         }
-        self._insert_after = self.root.after(1, self._insert_chunk)
-
-    def _clear(self):
-        self.var_include.set("")
-        self.var_exclude.set("")
-        self.var_type.set("All")
-        self._do_search()
-
-    # ── Table ─────────────────────────────────────────────────────────────────
-
-    def _clear_table(self):
-        self._insert_cancel = True
-        if self._insert_after:
-            self.root.after_cancel(self._insert_after)
-            self._insert_after = None
-        self._insert_job = None
-        self._delete_job = None
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
-
-    def _populate_table(self, results: list, full_total: int = 0):
-        # Route through the same async delete+insert pipeline as _flush_results
-        self._insert_cancel = True
-        if self._insert_after:
-            self.root.after_cancel(self._insert_after)
-            self._insert_after = None
-        self._insert_job = None
-        self._delete_job = None
-        self._queued_results = (results, full_total or len(results))
-        if self._flush_after:
-            self.root.after_cancel(self._flush_after)
-        self._flush_after = self.root.after(1, self._flush_results)
-
-    _INSERT_CHUNK = 20   # rows per chunk; 20 × ~5 ms = ~100 ms max per slice
+        self._step_after = self.root.after(1, self._insert_chunk)
 
     def _insert_chunk(self):
-        if self._insert_cancel or self._insert_job is None:
+        if self._pipeline_cancel or self._insert_job is None:
             return
         job     = self._insert_job
         results = job["results"]
         offset  = job["offset"]
-        end     = min(offset + self._INSERT_CHUNK, job["total"])
+        end     = min(offset + _INS_CHUNK, job["total"])
         prev_nr = job["prev_nr"]
         alt     = job["alt"]
 
@@ -866,11 +943,27 @@ class KisSearchApp:
         job["prev_nr"] = prev_nr
         job["alt"]     = alt
 
-        if end < job["total"] and not self._insert_cancel:
-            self._insert_after = self.root.after(1, self._insert_chunk)
+        if end < job["total"] and not self._pipeline_cancel:
+            self._step_after = self.root.after(1, self._insert_chunk)
         else:
-            self._insert_after = None
-            self._insert_job   = None
+            self._step_after = None
+            self._insert_job = None
+
+    def _cancel_pipeline(self):
+        self._pipeline_cancel = True
+        if self._step_after:
+            self.root.after_cancel(self._step_after)
+            self._step_after = None
+        self._delete_job = None
+        self._insert_job = None
+
+    def _clear(self):
+        self.var_include.set("")
+        self.var_exclude.set("")
+        self.var_type.set("All")
+        self._do_search()
+
+    # ── Sorting ───────────────────────────────────────────────────────────────
 
     def _sort_by(self, col):
         sk = {"full_id": "sgbm_nr"}.get(col, col)
@@ -920,35 +1013,30 @@ class KisSearchApp:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Bootstrap: show window → import heavy modules → start app
+# Bootstrap: show window → import heavy modules → build app
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _wait_for_imports(root: tk.Tk, base_path: Path,
                       import_q: queue.Queue,
                       splash_frame: tk.Frame,
-                      splash_lbl: tk.Label,
                       spin_lbl: tk.Label,
                       spin_state: list):
-    """Poll until heavy imports finish, then build the real UI."""
     try:
         msg = import_q.get_nowait()
     except queue.Empty:
-        # still loading — update spinner
         spin_state[0] = (spin_state[0] + 1) % len(_SPINNER)
         spin_lbl.config(text=_SPINNER[spin_state[0]])
         root.after(100, lambda: _wait_for_imports(
-            root, base_path, import_q, splash_frame, splash_lbl, spin_lbl, spin_state))
+            root, base_path, import_q, splash_frame, spin_lbl, spin_state))
         return
 
-    kind = msg[0]
-    if kind == "imports_err":
+    if msg[0] == "err":
         from tkinter import messagebox
         messagebox.showerror("Ошибка импорта",
                              f"Не удалось загрузить kis_search.py:\n{msg[1]}")
         root.destroy()
         return
 
-    # Imports succeeded — wire up globals and build app
     global _extract_entries, _search, _parse_terms, _pickle, _time_mod
     _, _pickle, _time_mod, _extract_entries, _search, _parse_terms = msg
 
@@ -956,17 +1044,23 @@ def _wait_for_imports(root: tk.Tk, base_path: Path,
     KisSearchApp(root, base_path)
 
 
-def main():
-    base = Path(sys.argv[1]) if len(sys.argv) > 1 else _THIS_DIR
+def _resolve_base_path() -> Path:
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1])
+    if sys.platform == "win32" and _DEFAULT_DB_WIN.is_dir():
+        return _DEFAULT_DB_WIN
+    return _THIS_DIR
 
-    # ── Create window immediately ─────────────────────────────────────────────
+
+def main():
+    base = _resolve_base_path()
+
     root = tk.Tk()
     root.title(APP_TITLE)
     root.geometry(f"{WIN_W}x{WIN_H}")
-    root.minsize(820, 520)
+    root.minsize(820, 540)
     root.configure(bg=C_BG)
 
-    # ── Minimal splash while heavy imports run ────────────────────────────────
     splash = tk.Frame(root, bg=C_BG)
     splash.place(relx=0, rely=0, relwidth=1, relheight=1)
 
@@ -979,22 +1073,18 @@ def main():
                         font=("Segoe UI", 26, "bold"))
     spin_lbl.place(relx=0.5, rely=0.50, anchor="center")
 
-    splash_lbl = tk.Label(splash, text="Загрузка модулей…",
-                          bg=C_BG, fg="#7f849c",
-                          font=("Segoe UI", 10))
-    splash_lbl.place(relx=0.5, rely=0.60, anchor="center")
+    tk.Label(splash, text="Загрузка модулей…",
+             bg=C_BG, fg=C_DIM,
+             font=("Segoe UI", 10)).place(relx=0.5, rely=0.60, anchor="center")
 
-    # ── Force render so user sees the splash before Python does anything ──────
-    root.update()
+    root.update()   # render splash before any heavy work
 
-    # ── Start heavy imports in background ────────────────────────────────────
     import_q = queue.Queue()
     threading.Thread(target=_do_heavy_imports, args=(import_q,),
                      daemon=True, name="imports").start()
 
-    # ── Poll for import completion ────────────────────────────────────────────
     root.after(80, lambda: _wait_for_imports(
-        root, base, import_q, splash, splash_lbl, spin_lbl, [0]))
+        root, base, import_q, splash, spin_lbl, [0]))
 
     root.mainloop()
 

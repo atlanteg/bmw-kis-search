@@ -14,6 +14,7 @@ __pycache__/
 # Search cache files
 .kis_cache.json
 .kis_gui_cache.pkl
+.kis_cache/
 
 # Platform data folders (auto-detected at runtime)
 S*/
