@@ -151,6 +151,10 @@ class KisSearchApp:
         self._insert_cancel = False  # signal to stop current chunk loop
         self._insert_after  = None   # after() id for next chunk
 
+        # async _do_search pipeline: results are queued, applied via after()
+        self._queued_results: tuple | None = None   # (results, full_total)
+        self._flush_after:    str | None   = None   # after() id for _flush
+
         # sequential platform load queue (prevents GIL stampede)
         self._load_queue: list[Path] = []   # platforms waiting to load
 
@@ -694,6 +698,7 @@ class KisSearchApp:
         self._debounce = self.root.after(320, self._do_search)
 
     def _do_search(self):
+        """Compute results instantly; schedule the slow tree update asynchronously."""
         if not self.entries:
             return
         inc_raw = self.var_include.get().strip()
@@ -717,8 +722,8 @@ class KisSearchApp:
         }
         results.sort(key=_keys.get(sort_by, _keys["sgbm_nr"]), reverse=rev)
         total = len(results)
-        self._populate_table(results, full_total=total)
 
+        # ── Update status bar INSTANTLY (user sees click response right away) ─
         shown = min(total, MAX_DISPLAY)
         parts = []
         if total > MAX_DISPLAY:
@@ -728,6 +733,49 @@ class KisSearchApp:
         if inc_raw:  parts.append(f"поиск: {inc_raw}")
         if exc_raw:  parts.append(f"исключить: {exc_raw}")
         self._set_status("  ·  ".join(parts))
+
+        # ── Queue the table update — never block the event loop ───────────────
+        self._queued_results = (results, total)
+        # Cancel previous pending flush (only latest result matters)
+        if self._flush_after:
+            self.root.after_cancel(self._flush_after)
+        # Also cancel any in-progress chunked insert
+        self._insert_cancel = True
+        if self._insert_after:
+            self.root.after_cancel(self._insert_after)
+            self._insert_after = None
+        self._insert_job = None
+        # Schedule the actual delete+insert after returning to event loop
+        self._flush_after = self.root.after(5, self._flush_results)
+
+    def _flush_results(self):
+        """Async: delete old rows then start inserting new ones (runs after event loop tick)."""
+        self._flush_after = None
+        if self._queued_results is None:
+            return
+        results, full_total = self._queued_results
+        self._queued_results = None
+
+        # Clear existing rows (synchronous, but we're in an async callback so
+        # Windows already processed the triggering event before we got here)
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+
+        if not results:
+            return
+
+        visible = results[:MAX_DISPLAY]
+        self._insert_cancel = False
+        self._insert_job = {
+            "results":    visible,
+            "offset":     0,
+            "prev_nr":    None,
+            "alt":        False,
+            "total":      len(visible),
+            "full_total": full_total,
+        }
+        self._insert_after = self.root.after(1, self._insert_chunk)
 
     def _clear(self):
         self.var_include.set("")
