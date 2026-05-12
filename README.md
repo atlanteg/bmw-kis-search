@@ -62,7 +62,7 @@ python kis_search_gui.py
 python kis_search_gui.py  C:\path\to\databases
 ```
 
-**Default database path (Windows):** `C:\data\kiswb`  
+**Default database path (Windows):** `C:\data\psdzdata\kiswb`  
 If that folder doesn't exist or contains no `KIS.data` files, a **Browse…** button appears so you can select any folder.
 
 **Features:**
@@ -91,6 +91,20 @@ If that folder doesn't exist or contains no `KIS.data` files, a **Browse…** bu
 | ENTD | Entry data |
 | HWAP | Hardware application |
 | SWFL | Software flash |
+
+---
+
+## Development
+
+After cloning, activate the git hooks once:
+
+```bash
+git config core.hooksPath hooks
+```
+
+Hooks included:
+- **`hooks/pre-commit`** — increments `BUILD` in `VERSION` and `kis_search_gui.py` before every commit
+- **`hooks/post-commit`** — pushes to `origin/main` after every commit
 
 ---
 
