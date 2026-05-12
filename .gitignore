@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# KIS database files (large binary data, not versioned)
+*.data
+*.log
+*.lck
+*.properties
+*.script
+*.tmp
+
+# Search cache files
+.kis_cache.json
+.kis_gui_cache.pkl
+
+# Platform data folders (auto-detected at runtime)
+S*/
+F*/
+G*/
+E*/
+K*/
+R*/
+U*/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
