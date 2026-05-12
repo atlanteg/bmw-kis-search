@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0004"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0005"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -62,6 +62,10 @@ COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 # Each Treeview insert/delete call on Windows takes 2–10 ms.
 # Limit visible rows; chunk inserts/deletes to never block > ~100 ms at once.
 MAX_DISPLAY   = 100
+
+# Watchdog: if the Tkinter event loop stops ticking for this many seconds
+# (UI is frozen / GIL permanently held), force-exit the process.
+_WATCHDOG_TIMEOUT = 20   # seconds
 _INS_CHUNK    = 20    # rows per insert slice
 _DEL_CHUNK    = 25    # rows per delete slice
 
@@ -217,8 +221,13 @@ class KisSearchApp:
         # sequential platform load queue (one at a time → no GIL stampede)
         self._load_queue : list[Path] = []
 
+        # watchdog heartbeat: main thread sets this event every second
+        self._wd_event = threading.Event()
+        self._wd_dot   = True   # for toggling the status-bar indicator
+
         self._setup_style()
         self._build_ui()
+        self._start_watchdog()
         self._find_and_preload()
 
     # ── ttk style ─────────────────────────────────────────────────────────────
@@ -455,6 +464,13 @@ class KisSearchApp:
                   style="Dim.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(sb, text="ДвойнойКлик / Ctrl+C → копировать Full ID",
                   style="Dim.TLabel").grid(row=0, column=1, sticky="e")
+        # Watchdog heartbeat indicator — pulses green every 1 s when alive;
+        # stops if frozen; process auto-exits after _WATCHDOG_TIMEOUT seconds.
+        self.var_wd = tk.StringVar(value="●")
+        self._lbl_wd = tk.Label(sb, textvariable=self.var_wd,
+                                bg=C_BG, fg=C_GREEN,
+                                font=("Segoe UI", 8))
+        self._lbl_wd.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         # ── Context menu ─────────────────────────────────────────────────────
         self._ctx = tk.Menu(self.root, tearoff=False,
@@ -1013,6 +1029,45 @@ class KisSearchApp:
 
     def _set_status(self, text: str):
         self.var_status.set(text)
+
+    # ── Watchdog ──────────────────────────────────────────────────────────────
+
+    def _start_watchdog(self):
+        threading.Thread(target=self._wd_run, daemon=True,
+                         name="watchdog").start()
+        self._wd_tick()
+
+    def _wd_tick(self):
+        """Called by the event loop every 1 s — proof that the UI is alive."""
+        self._wd_event.set()
+        # Toggle the dot: ● ↔ ○
+        self._wd_dot = not self._wd_dot
+        self.var_wd.set("●" if self._wd_dot else "○")
+        self.root.after(1000, self._wd_tick)
+
+    def _wd_run(self):
+        """Watchdog thread: force-exit if the UI stops ticking.
+
+        threading.Event.wait() releases the GIL (OS wait primitive), so this
+        thread runs even when other threads briefly hold the GIL.
+        If the event is never set within _WATCHDOG_TIMEOUT seconds the process
+        is killed via os._exit() — no cleanup, guaranteed termination.
+        """
+        import time as _t
+        import os   as _os
+        while True:
+            self._wd_event.clear()
+            alive = self._wd_event.wait(_WATCHDOG_TIMEOUT)
+            if not alive:
+                # UI loop has been silent for TIMEOUT seconds.
+                # Try a graceful exit first; if the interpreter is truly locked,
+                # fall back to the process-level _exit.
+                try:
+                    self.root.after(0, self.root.destroy)
+                except Exception:
+                    pass
+                _t.sleep(2)   # give destroy() a moment to fire
+                _os._exit(1)  # unconditional: bypass Python cleanup
 
 
 # ══════════════════════════════════════════════════════════════════════════════
