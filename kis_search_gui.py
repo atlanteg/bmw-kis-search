@@ -43,7 +43,7 @@ if sys.platform == "win32":
         pass
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-APP_TITLE   = "BMW KIS Search  ·  Written by NBTBoost © Atlanteg"
+APP_TITLE   = "BMW KIS Search  ·  by NBTboost creators © Atlanteg"
 WIN_W, WIN_H = 1150, 700
 FONT_UI     = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
