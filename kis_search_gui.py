@@ -43,7 +43,10 @@ if sys.platform == "win32":
         pass
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-APP_TITLE   = "BMW KIS Search  ·  by NBTboost creators © Atlanteg"
+_VERSION_MAJOR = "01"
+_VERSION_BUILD = "0000"   # auto-incremented by pre-commit hook
+APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
+               f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
 FONT_UI     = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
@@ -63,7 +66,7 @@ _INS_CHUNK    = 20    # rows per insert slice
 _DEL_CHUNK    = 25    # rows per delete slice
 
 # Default DB root on Windows.  Falls back to script dir or Browse.
-_DEFAULT_DB_WIN = Path(r"C:\data\kiswb")
+_DEFAULT_DB_WIN = Path(r"C:\data\psdzdata\kiswb")
 
 # Chunked pickle cache — each chunk holds this many entries.
 # Loading one chunk holds the GIL for ~5-20 ms; time.sleep(0) between
