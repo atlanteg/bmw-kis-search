@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0008"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0009"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -57,7 +57,7 @@ TYPES       = ["All", "SWFK", "CAFD", "BTLD", "HWEL", "FLSL", "SWFL", "ENTD", "H
 SORT_OPTS   = ["sgbm_nr", "type", "version", "desc"]
 COL_IDS     = ("sgbm_nr", "type", "version", "full_id", "desc")
 COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
-COL_WIDTHS  = (92,          62,     88,         215,        390)
+COL_WIDTHS  = (92,          62,     88,         255,        390)
 COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
 # Each Treeview insert/delete call on Windows takes 2–10 ms.
@@ -77,7 +77,7 @@ _DEFAULT_DB_WIN = Path(r"C:\data\psdzdata\kiswb")
 # Loading one chunk holds the GIL for ~5-20 ms; time.sleep(0) between
 # chunks releases the GIL so Tkinter's message pump stays alive.
 _CACHE_CHUNK   = 2000
-_CACHE_VERSION = 4   # bump when type mapping changes to force cache rebuild
+_CACHE_VERSION = 5   # bump when type mapping changes to force cache rebuild
 _CACHE_SUBDIR  = ".kis_cache"
 
 C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"

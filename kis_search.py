@@ -51,7 +51,7 @@ try:
 except ImportError:
     pass
 
-__version__ = "1.3.0"   # full Scapy-verified type mapping: 0x08=SWFL, 0x0C=IBAD, +NAVD
+__version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 R  = "\033[0m";  B  = "\033[1m";  D  = "\033[2m"
@@ -238,7 +238,7 @@ def extract_entries(data_path, progress=True, progress_cb=None):
                         "minor":   minor,
                         "patch":   patch,
                         "version": f"{major}.{minor}.{patch}",
-                        "full_id": f"{sgbm_nr}_{major:03d}_{minor:03d}_{patch:03d}",
+                        "full_id": f"{_type_name(tcode)}_{sgbm_nr}_{major:03d}_{minor:03d}_{patch:03d}",
                         "desc":    desc,
                         "type":    _type_name(tcode),
                     })
@@ -397,7 +397,7 @@ def _parse_terms(term_list):
 
 # ── Display ───────────────────────────────────────────────────────────────────
 
-_COL_WIDTHS = {"sgbm": 8, "type": 4, "version": 10, "full_id": 24}
+_COL_WIDTHS = {"sgbm": 8, "type": 4, "version": 10, "full_id": 30}
 
 
 def _highlight(text, terms):
