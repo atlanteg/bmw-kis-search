@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0031"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0032"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -324,7 +324,16 @@ def _apply_update(root: "tk.Tk"):
     path = Path(__file__).resolve()
     tmp  = path.with_suffix(".py.new")
     try:
-        _ur.urlretrieve(_GITHUB_RAW + "/kis_search_gui.py", tmp)
+        # Use GitHub Contents API to bypass Fastly CDN cache
+        api_req = _ur.Request(
+            f"https://api.github.com/repos/{_GITHUB_REPO}/contents/kis_search_gui.py",
+            headers={
+                "User-Agent": f"bmw-kis-search/v01.{_VERSION_BUILD}",
+                "Accept":     "application/vnd.github.raw",
+            },
+        )
+        with _ur.urlopen(api_req, timeout=30) as resp:
+            tmp.write_bytes(resp.read())
         # Verify downloaded file actually contains a newer build
         try:
             text = tmp.read_text(encoding="utf-8", errors="replace")
