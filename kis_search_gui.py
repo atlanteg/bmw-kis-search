@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0023"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0024"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -293,8 +293,8 @@ def _cache_meta(db_path: Path) -> Path:
     return _cache_dir(db_path) / "meta.pkl"
 
 
-def _fetch_latest_build() -> int | None:
-    """Return latest BUILD int from GitHub VERSION file, or None on failure."""
+def _fetch_latest_build() -> "tuple[int | None, str]":
+    """Return (latest_build, error_str). error_str is '' on success."""
     try:
         import urllib.request as _ur
         req = _ur.Request(
@@ -304,9 +304,11 @@ def _fetch_latest_build() -> int | None:
         with _ur.urlopen(req, timeout=8) as r:
             text = r.read().decode()
         m = re.search(r"BUILD=(\d+)", text)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
+        if m:
+            return int(m.group(1)), ""
+        return None, f"BUILD not found in: {text[:80]!r}"
+    except Exception as e:
+        return None, str(e)
 
 
 def _apply_update(root: "tk.Tk"):
@@ -1269,15 +1271,17 @@ class KisSearchApp:
                          name="update-check").start()
 
     def _update_check_run(self):
-        # Retry up to 3 times with increasing delays (5s, 30s, 120s)
-        # in case the network isn't ready at startup.
+        last_err = ""
+        latest   = None
         for delay in (0, 5, 30, 120):
             if delay:
                 _time_mod.sleep(delay)
-            latest = _fetch_latest_build()
+            latest, last_err = _fetch_latest_build()
             if latest is not None:
                 break
         if latest is None:
+            self.root.after(0, lambda e=last_err: self._lbl_update.config(
+                text=f"upd err: {e[:60]}", fg=C_RED))
             return
         current = int(_VERSION_BUILD)
         if latest <= current:
