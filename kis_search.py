@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
-_BUILD = "0021"         # kept in sync with VERSION/BUILD by pre-commit hook
+_BUILD = "0022"         # kept in sync with VERSION/BUILD by pre-commit hook
 
 _GITHUB_REPO = "atlanteg/bmw-kis-search"
 _GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
@@ -671,8 +671,21 @@ def _check_update_cli():
     """Print a one-line notice and offer to update if a newer build exists."""
     try:
         import urllib.request, shutil
-        with urllib.request.urlopen(_GITHUB_RAW + "/VERSION", timeout=4) as r:
-            text = r.read().decode()
+        req = urllib.request.Request(
+            _GITHUB_RAW + "/VERSION",
+            headers={"User-Agent": f"bmw-kis-search/v01.{_BUILD}"},
+        )
+        # Retry once on failure (network may not be ready)
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    text = r.read().decode()
+                break
+            except Exception:
+                if attempt == 0:
+                    import time as _t; _t.sleep(3)
+                else:
+                    return
         import re as _re
         m = _re.search(r"BUILD=(\d+)", text)
         if not m:
