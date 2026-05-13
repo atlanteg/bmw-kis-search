@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0019"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0020"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -313,6 +313,20 @@ def _apply_update(root: "tk.Tk"):
     tmp  = path.with_suffix(".py.new")
     try:
         _ur.urlretrieve(_GITHUB_RAW + "/kis_search_gui.py", tmp)
+        # Verify downloaded file actually contains a newer build
+        try:
+            text = tmp.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'_VERSION_BUILD\s*=\s*"(\d+)"', text)
+            if m and int(m.group(1)) <= int(_VERSION_BUILD):
+                tmp.unlink(missing_ok=True)
+                messagebox.showwarning(
+                    "Обновление",
+                    f"Скачанный файл (v01.{m.group(1)}) не новее текущей "
+                    f"(v01.{_VERSION_BUILD}).\nПопробуйте позже.",
+                    parent=root)
+                return
+        except Exception:
+            pass  # verification failed — proceed with the update anyway
         bak = path.with_suffix(".py.bak")
         bak.unlink(missing_ok=True)
         _sh.copy2(path, bak)
@@ -322,7 +336,10 @@ def _apply_update(root: "tk.Tk"):
         messagebox.showerror("Ошибка обновления", str(e), parent=root)
         return
     import subprocess
-    subprocess.Popen([sys.executable] + sys.argv)
+    # Use the resolved absolute path so the restarted process loads the
+    # updated file, not whatever sys.argv[0] happened to be (could be a
+    # relative path or a different copy of the script).
+    subprocess.Popen([sys.executable, str(path)] + sys.argv[1:])
     os._exit(0)
 
 

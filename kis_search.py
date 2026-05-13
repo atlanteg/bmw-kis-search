@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
-_BUILD = "0019"         # kept in sync with VERSION/BUILD by pre-commit hook
+_BUILD = "0020"         # kept in sync with VERSION/BUILD by pre-commit hook
 
 _GITHUB_REPO = "atlanteg/bmw-kis-search"
 _GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
@@ -692,6 +692,18 @@ def _check_update_cli():
         path = Path(__file__).resolve()
         tmp  = path.with_suffix(".py.new")
         urllib.request.urlretrieve(_GITHUB_RAW + "/kis_search.py", tmp)
+        # Verify downloaded file actually contains a newer build
+        try:
+            import re as _re2
+            text = tmp.read_text(encoding="utf-8", errors="replace")
+            mv = _re2.search(r'_BUILD\s*=\s*"(\d+)"', text)
+            if mv and int(mv.group(1)) <= current:
+                tmp.unlink(missing_ok=True)
+                print(_c(f"Скачанный файл (v01.{mv.group(1)}) не новее текущей. Попробуйте позже.", RE),
+                      file=sys.stderr)
+                return
+        except Exception:
+            pass
         bak = path.with_suffix(".py.bak")
         bak.unlink(missing_ok=True)
         shutil.copy2(path, bak)
