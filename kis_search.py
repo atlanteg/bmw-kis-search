@@ -51,7 +51,7 @@ try:
 except ImportError:
     pass
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"   # type mapping fix: 0x04=GWTB, 0x05=CAFD; rfind→find
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 R  = "\033[0m";  B  = "\033[1m";  D  = "\033[2m"
@@ -65,18 +65,20 @@ def _c(text, *codes):
     return ("".join(codes) + str(text) + R) if _USE_COLOR else str(text)
 
 # ── SGBM type codes ───────────────────────────────────────────────────────────
-# Derived from SGBMID byte 3 (0-indexed from MSB in the 8-byte big-endian SGBMID)
+# Derived from SGBMID byte 3 (0-indexed from MSB in the 8-byte big-endian SGBMID).
+# NOTE: 0x04=GWTB, 0x05=CAFD — verified by user; previously were swapped.
 _SGBM_TYPES = {
     0x01: "HWEL", 0x02: "HWAP", 0x03: "HWFR",
-    0x04: "CAFD", 0x05: "BTLD", 0x06: "BTLD",
+    0x04: "GWTB", 0x05: "CAFD", 0x06: "BTLD",
     0x07: "FLSL", 0x08: "FLSL", 0x09: "ENTD",
     0x0A: "ENTD", 0x0B: "SWID", 0x0C: "SWFL",
     0x0D: "SWFK", 0x0E: "ENTD", 0x0F: "CHSC",
     0x10: "CRSF", 0x11: "ORSI",
+    # IBAD type byte not yet confirmed — run --list-types to discover it
 }
 _TYPE_COL = {
     "SWFK": GR, "CAFD": YL, "BTLD": CY,
-    "HWEL": BL, "FLSL": MG, "ENTD": WH,
+    "HWEL": BL, "FLSL": MG, "ENTD": WH, "GWTB": RE,
 }
 
 def _type_name(code):
@@ -144,13 +146,19 @@ def _extract_type(data, match_start, sgbm_nr_hex):
     Find the SGBM type byte from the SGBMID that precedes the ASCII SGBM_NR.
     SGBMID structure (big-endian 8 bytes): XX XX subtype TYPE 00 00 HIGH LOW
     where the last 4 bytes equal the numeric value of SGBM_NR.
+
+    Bug note: must use find() not rfind().  The WERT field (4 bytes, stored
+    just before the ASCII SGBM_NR) often equals the SGBM_NR numeric value,
+    so rfind() would land on WERT instead of SGBMID and read the wrong byte.
+    find() returns the first (leftmost) occurrence which is always SGBMID.
+    Window widened to 64 bytes to cover variable-length gaps.
     """
     try:
-        nr_bytes = bytes.fromhex(sgbm_nr_hex)          # e.g. b'\x00\x00\x88\x91'
-        window = data[max(0, match_start - 28): match_start]
-        bi = window.rfind(nr_bytes)
+        nr_bytes = bytes.fromhex(sgbm_nr_hex)
+        window = data[max(0, match_start - 64): match_start]
+        bi = window.find(nr_bytes)          # ← find, NOT rfind
         if bi >= 1:
-            return window[bi - 1]                       # TYPE byte
+            return window[bi - 1]           # TYPE byte (byte 3 of SGBMID)
     except Exception:
         pass
     return None
@@ -270,7 +278,8 @@ def load_cache(data_path):
             c = json.load(f)
         dp = str(data_path)
         if (abs(c.get("mtime", 0) - os.path.getmtime(dp)) < 1
-                and c.get("size") == os.path.getsize(dp)):
+                and c.get("size") == os.path.getsize(dp)
+                and c.get("version") == __version__):   # invalidate on version bump
             return c["entries"]
     except Exception:
         pass
@@ -572,6 +581,44 @@ def find_db(hint=None):
     )
 
 
+def _cmd_list_types(entries):
+    """Print all unique raw type bytes found in the DB with entry counts."""
+    from collections import Counter
+    inv = {v: k for k, v in _SGBM_TYPES.items()}
+    code_counter: Counter = Counter()
+    unknown_names: dict[str, int] = {}
+
+    for e in entries:
+        t = e["type"]
+        if t in inv:
+            code_counter[inv[t]] += 1
+        else:
+            unknown_names[t] = unknown_names.get(t, 0) + 1
+
+    print(f"\n{'Code':<6} {'Name':<8}  {'Count':>7}  {'Sample SGBM_NR'}")
+    print("─" * 50)
+
+    samples: dict = {}
+    for e in entries:
+        code = inv.get(e["type"])
+        if code is not None and code not in samples:
+            samples[code] = e["sgbm_nr"]
+
+    for code in sorted(code_counter):
+        name = _SGBM_TYPES[code]
+        print(f"  0x{code:02X}  {name:<8}  {code_counter[code]:>7}  {samples.get(code, '')}")
+
+    for name, cnt in sorted(unknown_names.items()):
+        print(f"  ????  {name:<8}  {cnt:>7}  ← unknown, add to _SGBM_TYPES")
+
+    total = sum(code_counter.values()) + sum(unknown_names.values())
+    print(f"\n  Total: {total} entries across "
+          f"{len(code_counter) + len(unknown_names)} distinct types")
+    if unknown_names:
+        print("\n  Unknown types appear in the Type column as shown.")
+        print("  Run with -t <NAME> (e.g. -t T12) to filter by unknown type.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def build_parser():
@@ -604,6 +651,9 @@ Examples:
                    help="Launch interactive search REPL")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force re-scan even if cached data exists")
+    p.add_argument("--list-types", action="store_true",
+                   help="Scan DB and list all unique type codes with counts — "
+                        "use this to discover the byte code for IBAD and other types")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI colour output")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -628,7 +678,8 @@ def main():
     if args.no_color:
         _USE_COLOR = False
 
-    if not args.interactive and not args.terms and not args.rebuild_cache:
+    if not args.interactive and not args.terms \
+            and not args.rebuild_cache and not args.list_types:
         parser.print_help()
         print()
         sys.exit(0)
@@ -651,6 +702,10 @@ def main():
     if entries is None:
         entries = extract_entries(db, progress=True)
         save_cache(db, entries)
+
+    if args.list_types:
+        _cmd_list_types(entries)
+        return
 
     if args.interactive:
         interactive_loop(entries, db)
