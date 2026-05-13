@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0009"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0010"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -129,40 +129,44 @@ def _cache_meta(db_path: Path) -> Path:
     return _cache_dir(db_path) / "meta.pkl"
 
 
+def _wipe_cache(db_path: Path):
+    """Delete all cache files for this database (forces fresh scan)."""
+    import shutil as _shutil
+    try:
+        _shutil.rmtree(_cache_dir(db_path), ignore_errors=True)
+    except Exception:
+        pass
+    for old in (db_path.parent / ".kis_gui_cache.pkl",):
+        try:
+            old.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _load_fast_cache(db_path: Path):
     """Load chunked cache; yields GIL between chunks. Returns list or None."""
     meta_path = _cache_meta(db_path)
-
-    # ── New chunked format ────────────────────────────────────────────────────
-    if meta_path.exists():
-        try:
-            with open(meta_path, "rb") as f:
-                meta = _pickle.load(f)
-            if (meta.get("v") == _CACHE_VERSION and
-                    meta.get("mtime", 0) >= db_path.stat().st_mtime):
-                cdir    = meta_path.parent
-                entries = []
-                for i in range(meta["chunks"]):
-                    with open(cdir / f"c{i:05d}.pkl", "rb") as f:
-                        entries.extend(_pickle.load(f))
-                    _time_mod.sleep(0)   # ← release GIL between every chunk
-                if len(entries) == meta["count"]:
-                    return entries
-        except Exception:
-            pass
-
-    # ── Migrate old single-file format (.kis_gui_cache.pkl) ──────────────────
-    old = db_path.parent / ".kis_gui_cache.pkl"
-    if old.exists():
-        try:
-            if old.stat().st_mtime >= db_path.stat().st_mtime:
-                with open(old, "rb") as f:
-                    entries = _pickle.load(f)   # one-time GIL hold for migration
-                _save_fast_cache(db_path, entries)
-                return entries
-        except Exception:
-            pass
-
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path, "rb") as f:
+            meta = _pickle.load(f)
+        if meta.get("v") != _CACHE_VERSION:
+            _wipe_cache(db_path)   # wrong version — delete so rescan is clean
+            return None
+        if meta.get("mtime", 0) < db_path.stat().st_mtime:
+            _wipe_cache(db_path)
+            return None
+        cdir    = meta_path.parent
+        entries = []
+        for i in range(meta["chunks"]):
+            with open(cdir / f"c{i:05d}.pkl", "rb") as f:
+                entries.extend(_pickle.load(f))
+            _time_mod.sleep(0)   # ← release GIL between every chunk
+        if len(entries) == meta["count"]:
+            return entries
+    except Exception:
+        _wipe_cache(db_path)
     return None
 
 
