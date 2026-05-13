@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0025"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0026"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -1267,6 +1267,8 @@ class KisSearchApp:
     # ── Auto-update ───────────────────────────────────────────────────────────
 
     def _start_update_check(self):
+        self.root.after(0, lambda: self._lbl_update.config(
+            text="upd: проверка…", fg=C_DIM))
         threading.Thread(target=self._update_check_run, daemon=True,
                          name="update-check").start()
 
@@ -1281,10 +1283,12 @@ class KisSearchApp:
                 break
         if latest is None:
             self.root.after(0, lambda e=last_err: self._lbl_update.config(
-                text=f"upd err: {e[:60]}", fg=C_RED))
+                text=f"upd err: {e[:80]}", fg=C_RED))
             return
         current = int(_VERSION_BUILD)
         if latest <= current:
+            self.root.after(0, lambda v=latest: self._lbl_update.config(
+                text=f"upd: v01.{v:04d} (актуально)", fg=C_DIM))
             return
         self.root.after(0, lambda: self._show_update_badge(latest))
 
