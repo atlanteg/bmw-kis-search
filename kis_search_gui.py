@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0027"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0028"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -297,15 +297,14 @@ def _fetch_latest_build() -> "tuple[int | None, str]":
     """Return (latest_build, error_str). error_str is '' on success."""
     try:
         import urllib.request as _ur
-        # Timestamp query param busts the Fastly CDN cache so we always
-        # get the current file and not a stale cached copy.
-        ts  = int(_time_mod.time())
+        # Use the GitHub Contents API — different infrastructure from
+        # raw.githubusercontent.com, not subject to Fastly CDN caching.
+        # Accept: application/vnd.github.raw returns the file as plain text.
         req = _ur.Request(
-            f"{_GITHUB_RAW}/VERSION?t={ts}",
+            f"https://api.github.com/repos/{_GITHUB_REPO}/contents/VERSION",
             headers={
-                "User-Agent":    f"bmw-kis-search/v01.{_VERSION_BUILD}",
-                "Cache-Control": "no-cache",
-                "Pragma":        "no-cache",
+                "User-Agent": f"bmw-kis-search/v01.{_VERSION_BUILD}",
+                "Accept":     "application/vnd.github.raw",
             },
         )
         with _ur.urlopen(req, timeout=8) as r:
