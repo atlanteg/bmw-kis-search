@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-kis_search_gui.py  –  BMW KIS Database Search GUI
+kis_search_gui.py  –  BMW KIS Database Search GUI  (standalone, no dependencies)
 Written by NBTBoost (c) Atlanteg
 
-Graphical companion to kis_search.py.
 Requires Python 3.8+ with Tkinter (bundled in standard Python for Windows).
 
 TIP for Windows: rename / copy this file as  kis_search_gui.pyw  so that
@@ -23,6 +22,11 @@ from tkinter import ttk
 import threading
 import queue
 from pathlib import Path
+import mmap
+import os
+import re
+import struct
+import time as _time_mod
 
 # ── Hide the black Windows console window right away ─────────────────────────
 if sys.platform == "win32":
@@ -44,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0011"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0012"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -98,34 +102,180 @@ _THIS_DIR = Path(__file__).parent
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 2 — heavy imports in background thread AFTER window is shown
+# KIS SEARCH ENGINE  (embedded — no external kis_search.py needed)
 # ══════════════════════════════════════════════════════════════════════════════
-_extract_entries = None
-_search          = None
-_parse_terms     = None
-_pickle          = None
-_time_mod        = None
+
+_SGBM_TYPES = {
+    # Source: Scapy automotive BMW definitions (process_classes)
+    0x01: "HWEL", 0x02: "HWAP", 0x03: "HWFR",
+    0x04: "GWTB", 0x05: "CAFD", 0x06: "BTLD",
+    0x07: "FLSL", 0x08: "SWFL", 0x09: "SWFF",
+    0x0A: "SWPF", 0x0B: "ONPS", 0x0C: "IBAD",
+    0x0D: "SWFK", 0x0F: "FAFP", 0x10: "FCFA",
+    0x1A: "TLRT", 0x1B: "TPRG", 0x1C: "BLUP", 0x1D: "FLUP",
+    0xA0: "ENTD", 0xA1: "NAVD", 0xA2: "FCFN",
+    0xC0: "SWUP", 0xC1: "SWIP",
+}
+
+_ENTRY_RE = re.compile(
+    rb'([0-9A-F]{8})'
+    rb'\x01\x00\x00\x00([\x00-\xff])'
+    rb'\x01\x00\x00\x00([\x00-\xff])'
+    rb'\x01\x00\x00\x00([\x00-\xff])'
+)
+
+def _type_name(code):
+    if code is None:
+        return "????"
+    return _SGBM_TYPES.get(code, f"T{code:02X}")
+
+def _skip_char1(data, pos):
+    if pos >= len(data):
+        return pos
+    b = data[pos]
+    if b == 0x00:
+        return pos + 1
+    if b == 0x01 and pos + 5 < len(data) and data[pos + 1:pos + 5] == b'\x00\x00\x00\x01':
+        return pos + 6
+    return pos
+
+def _read_varchar(data, pos):
+    if pos >= len(data):
+        return "", pos
+    if data[pos] == 0x00:
+        return "", pos + 1
+    if data[pos] != 0x01 or pos + 5 > len(data):
+        return "", pos
+    length = struct.unpack_from(">I", data, pos + 1)[0]
+    if length == 0 or length > 2048:
+        return "", pos + 5
+    end = pos + 5 + length
+    if end > len(data):
+        return "", pos + 5
+    try:
+        text = data[pos + 5:end].decode("utf-8", errors="replace")
+    except Exception:
+        text = data[pos + 5:end].decode("latin-1", errors="replace")
+    return text.strip(), end
+
+def _extract_type(data, match_start, sgbm_nr_hex):
+    try:
+        nr_bytes = bytes.fromhex(sgbm_nr_hex)
+        window = data[max(0, match_start - 64): match_start]
+        bi = window.find(nr_bytes)
+        if bi >= 1:
+            return window[bi - 1]
+    except Exception:
+        pass
+    return None
+
+def extract_entries(data_path, progress=False, progress_cb=None):
+    path  = str(data_path)
+    size  = os.path.getsize(path)
+    entries    = []
+    CHUNK      = 512 * 1024
+    OVERLAP    = 30
+    pos        = 0
+    _last_cb_t = 0.0
+    with open(path, "rb") as fh:
+        mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            while pos < size:
+                seg_start = max(0, pos - OVERLAP)
+                seg_end   = min(pos + CHUNK, size)
+                chunk = bytes(mm[seg_start:seg_end])
+                for m in _ENTRY_RE.finditer(chunk):
+                    abs_start = seg_start + m.start()
+                    if abs_start < pos:
+                        continue
+                    sgbm_nr = m.group(1).decode("ascii")
+                    major   = m.group(2)[0]
+                    minor   = m.group(3)[0]
+                    patch   = m.group(4)[0]
+                    if major > 999 or minor > 999 or patch > 9999:
+                        continue
+                    p = seg_start + m.end()
+                    for _ in range(5):
+                        np = _skip_char1(mm, p)
+                        if np == p:
+                            break
+                        p = np
+                    desc, _ = _read_varchar(mm, p)
+                    if desc and not all(0x20 <= ord(c) < 0x100 for c in desc):
+                        desc = ""
+                    tcode = _extract_type(mm, abs_start, sgbm_nr)
+                    entries.append({
+                        "sgbm_nr": sgbm_nr,
+                        "major":   major,
+                        "minor":   minor,
+                        "patch":   patch,
+                        "version": f"{major}.{minor}.{patch}",
+                        "full_id": f"{_type_name(tcode)}_{sgbm_nr}_{major:03d}_{minor:03d}_{patch:03d}",
+                        "desc":    desc,
+                        "type":    _type_name(tcode),
+                    })
+                pos = seg_end
+                _time_mod.sleep(0)
+                now = _time_mod.time()
+                if progress_cb and now - _last_cb_t >= 0.15:
+                    progress_cb(pos / size)
+                    _last_cb_t = now
+        finally:
+            mm.close()
+    return entries
+
+def _haystack(e):
+    return " ".join([e["full_id"], e["sgbm_nr"], e["desc"], e["type"], e["version"]]).upper()
+
+def _and_match(entry, include, exclude):
+    h = _haystack(entry)
+    return (all(t.upper() in h for t in include) and
+            not any(t.upper() in h for t in exclude))
+
+def search(entries, groups, exclude=None, type_filter=None):
+    if type_filter:
+        entries = [e for e in entries if e["type"] == type_filter.upper()]
+    exclude = [e.lstrip("!") for e in (exclude or [])]
+    if not groups or not any(groups):
+        if exclude:
+            return [e for e in entries if _and_match(e, [], exclude)]
+        return list(entries)
+    results = []
+    for e in entries:
+        if any(_and_match(e, grp, exclude) for grp in groups if grp):
+            results.append(e)
+    return results
+
+def _parse_terms(term_list):
+    groups = []; cur = []; exclude = []
+    for tok in term_list:
+        parts = tok.split("|")
+        for i, part in enumerate(parts):
+            if i > 0:
+                if cur: groups.append(cur)
+                cur = []
+            part = part.strip()
+            if not part: continue
+            if part.startswith("!"):
+                exclude.append(part[1:])
+            elif part == "|":
+                if cur: groups.append(cur)
+                cur = []
+            else:
+                cur.append(part)
+    if cur: groups.append(cur)
+    return (groups if groups else [[]]), exclude
 
 
-_MIN_KIS_SEARCH_VERSION = (1, 4, 0)   # must match kis_search.py __version__
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2 — load pickle in background so window stays snappy
+# ══════════════════════════════════════════════════════════════════════════════
+_pickle = None
 
 def _do_heavy_imports(result_q: queue.Queue):
     try:
         import pickle as _pk
-        import time   as _tm
-        sys.path.insert(0, str(_THIS_DIR))
-        import kis_search as _ks
-        # Verify kis_search.py is new enough (type mapping + full_id format)
-        ver_str = getattr(_ks, "__version__", "0.0.0")
-        ver = tuple(int(x) for x in ver_str.split(".")[:3])
-        if ver < _MIN_KIS_SEARCH_VERSION:
-            result_q.put(("err",
-                f"kis_search.py слишком старый (v{ver_str}), нужна v"
-                f"{'.'.join(str(x) for x in _MIN_KIS_SEARCH_VERSION)}+.\n"
-                f"Обнови kis_search.py из репозитория."))
-            return
-        result_q.put(("ok", _pk, _tm,
-                      _ks.extract_entries, _ks.search, _ks._parse_terms))
+        result_q.put(("ok", _pk))
     except Exception as e:
         result_q.put(("err", str(e)))
 
@@ -672,7 +822,7 @@ class KisSearchApp:
                     if cached is not None:
                         q.put(("done", name, cached, True, _time_mod.time() - t0))
                         return
-                entries = _extract_entries(db, progress=False,
+                entries = extract_entries(db, progress=False,
                                            progress_cb=_progress_cb)
                 _save_fast_cache(db, entries)
                 q.put(("done", name, entries, False, _time_mod.time() - t0))
@@ -862,7 +1012,7 @@ class KisSearchApp:
         exc       = exc_raw.split() if exc_raw else []
         tf_arg    = None if tf == "All" else tf
 
-        results = _search(self.entries, groups, exclude=exc, type_filter=tf_arg)
+        results = search(self.entries, groups, exclude=exc, type_filter=tf_arg)
 
         rev = self._sort_rev if self._sort_col == sort_by else False
         self._sort_col = sort_by
@@ -1109,13 +1259,12 @@ def _wait_for_imports(root: tk.Tk, base_path: Path,
 
     if msg[0] == "err":
         from tkinter import messagebox
-        messagebox.showerror("Ошибка импорта",
-                             f"Не удалось загрузить kis_search.py:\n{msg[1]}")
+        messagebox.showerror("Ошибка", f"Не удалось загрузить модуль pickle:\n{msg[1]}")
         root.destroy()
         return
 
-    global _extract_entries, _search, _parse_terms, _pickle, _time_mod
-    _, _pickle, _time_mod, _extract_entries, _search, _parse_terms = msg
+    global _pickle
+    _, _pickle = msg
 
     splash_frame.destroy()
     KisSearchApp(root, base_path)
