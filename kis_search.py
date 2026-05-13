@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
-_BUILD = "0035"         # kept in sync with VERSION/BUILD by pre-commit hook
+_BUILD = "0036"         # kept in sync with VERSION/BUILD by pre-commit hook
 
 _GITHUB_REPO = "atlanteg/bmw-kis-search"
 _GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
@@ -672,8 +672,11 @@ def _check_update_cli():
     try:
         import urllib.request, shutil
         req = urllib.request.Request(
-            _GITHUB_RAW + "/VERSION",
-            headers={"User-Agent": f"bmw-kis-search/v01.{_BUILD}"},
+            f"https://api.github.com/repos/{_GITHUB_REPO}/contents/VERSION",
+            headers={
+                "User-Agent": f"bmw-kis-search/v01.{_BUILD}",
+                "Accept":     "application/vnd.github.raw",
+            },
         )
         # Retry once on failure (network may not be ready)
         for attempt in range(2):
