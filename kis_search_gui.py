@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0007"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0008"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -52,8 +52,8 @@ FONT_UI     = ("Segoe UI", 9)
 FONT_MONO   = ("Consolas", 9)
 FONT_BOLD   = ("Segoe UI", 9, "bold")
 FONT_HUGE   = ("Segoe UI", 18, "bold")
-TYPES       = ["All", "SWFK", "CAFD", "BTLD", "HWEL", "FLSL", "ENTD", "HWAP", "SWFL",
-               "GWTB", "IBAD"]
+TYPES       = ["All", "SWFK", "CAFD", "BTLD", "HWEL", "FLSL", "SWFL", "ENTD", "HWAP",
+               "GWTB", "IBAD", "NAVD"]
 SORT_OPTS   = ["sgbm_nr", "type", "version", "desc"]
 COL_IDS     = ("sgbm_nr", "type", "version", "full_id", "desc")
 COL_HEADS   = ("SGBM_NR",  "Type", "Version", "Full ID",  "Description")
@@ -77,7 +77,7 @@ _DEFAULT_DB_WIN = Path(r"C:\data\psdzdata\kiswb")
 # Loading one chunk holds the GIL for ~5-20 ms; time.sleep(0) between
 # chunks releases the GIL so Tkinter's message pump stays alive.
 _CACHE_CHUNK   = 2000
-_CACHE_VERSION = 3   # bump when type mapping changes to force cache rebuild
+_CACHE_VERSION = 4   # bump when type mapping changes to force cache rebuild
 _CACHE_SUBDIR  = ".kis_cache"
 
 C_BG      = "#1e1e2e"; C_PANEL   = "#2a2a3e"; C_INPUT   = "#313145"
@@ -89,7 +89,8 @@ C_ROW_ALT = "#252538"; C_OVERLAY = "#1a1a28"
 TYPE_COLORS = {
     "SWFK": C_GREEN,  "CAFD": C_YELLOW,
     "BTLD": C_CYAN,   "HWEL": C_ACCENT, "FLSL": "#cba6f7",
-    "GWTB": C_RED,    "IBAD": "#fab387",
+    "GWTB": C_RED,    "IBAD": "#fab387", "NAVD": "#89dceb",
+    "SWFL": "#a6e3a1",
 }
 _SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 

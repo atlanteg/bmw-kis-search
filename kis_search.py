@@ -51,7 +51,7 @@ try:
 except ImportError:
     pass
 
-__version__ = "1.2.0"   # type mapping fix: 0x04=GWTB, 0x05=CAFD; rfind→find
+__version__ = "1.3.0"   # full Scapy-verified type mapping: 0x08=SWFL, 0x0C=IBAD, +NAVD
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 R  = "\033[0m";  B  = "\033[1m";  D  = "\033[2m"
@@ -68,17 +68,20 @@ def _c(text, *codes):
 # Derived from SGBMID byte 3 (0-indexed from MSB in the 8-byte big-endian SGBMID).
 # NOTE: 0x04=GWTB, 0x05=CAFD — verified by user; previously were swapped.
 _SGBM_TYPES = {
+    # Source: Scapy automotive BMW definitions (process_classes)
     0x01: "HWEL", 0x02: "HWAP", 0x03: "HWFR",
     0x04: "GWTB", 0x05: "CAFD", 0x06: "BTLD",
-    0x07: "FLSL", 0x08: "FLSL", 0x09: "ENTD",
-    0x0A: "ENTD", 0x0B: "SWID", 0x0C: "SWFL",
-    0x0D: "SWFK", 0x0E: "ENTD", 0x0F: "CHSC",
-    0x10: "CRSF", 0x11: "ORSI",
-    # IBAD type byte not yet confirmed — run --list-types to discover it
+    0x07: "FLSL", 0x08: "SWFL", 0x09: "SWFF",
+    0x0A: "SWPF", 0x0B: "ONPS", 0x0C: "IBAD",
+    0x0D: "SWFK", 0x0F: "FAFP", 0x10: "FCFA",
+    0x1A: "TLRT", 0x1B: "TPRG", 0x1C: "BLUP", 0x1D: "FLUP",
+    0xA0: "ENTD", 0xA1: "NAVD", 0xA2: "FCFN",
+    0xC0: "SWUP", 0xC1: "SWIP",
 }
 _TYPE_COL = {
     "SWFK": GR, "CAFD": YL, "BTLD": CY,
     "HWEL": BL, "FLSL": MG, "ENTD": WH, "GWTB": RE,
+    "IBAD": YL, "NAVD": CY, "SWFL": GR,
 }
 
 def _type_name(code):
