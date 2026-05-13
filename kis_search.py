@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
-_BUILD = "0034"         # kept in sync with VERSION/BUILD by pre-commit hook
+_BUILD = "0035"         # kept in sync with VERSION/BUILD by pre-commit hook
 
 _GITHUB_REPO = "atlanteg/bmw-kis-search"
 _GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
@@ -663,7 +663,7 @@ Examples:
                         "use this to discover the byte code for IBAD and other types")
     p.add_argument("--no-color", action="store_true",
                    help="Disable ANSI colour output")
-    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    p.add_argument("--version", action="version", version=f"%(prog)s v01.{_BUILD}")
     return p
 
 
