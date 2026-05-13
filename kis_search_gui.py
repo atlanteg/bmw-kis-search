@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0026"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0027"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -297,9 +297,16 @@ def _fetch_latest_build() -> "tuple[int | None, str]":
     """Return (latest_build, error_str). error_str is '' on success."""
     try:
         import urllib.request as _ur
+        # Timestamp query param busts the Fastly CDN cache so we always
+        # get the current file and not a stale cached copy.
+        ts  = int(_time_mod.time())
         req = _ur.Request(
-            _GITHUB_RAW + "/VERSION",
-            headers={"User-Agent": f"bmw-kis-search/v01.{_VERSION_BUILD}"},
+            f"{_GITHUB_RAW}/VERSION?t={ts}",
+            headers={
+                "User-Agent":    f"bmw-kis-search/v01.{_VERSION_BUILD}",
+                "Cache-Control": "no-cache",
+                "Pragma":        "no-cache",
+            },
         )
         with _ur.urlopen(req, timeout=8) as r:
             text = r.read().decode()
