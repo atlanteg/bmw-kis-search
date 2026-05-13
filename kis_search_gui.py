@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0006"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0007"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -1044,7 +1044,7 @@ class KisSearchApp:
         self._wd_event.set()
         # Toggle the dot: ● ↔ ○
         self._wd_dot = not self._wd_dot
-        self.var_wd.set("●" if self._wd_dot else "○")
+        self.var_wd.set("●" if self._wd_dot else " ")
         self.root.after(1000, self._wd_tick)
 
     def _wd_run(self):
