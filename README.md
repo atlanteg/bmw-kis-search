@@ -83,14 +83,30 @@ If that folder doesn't exist or contains no `KIS.data` files, a **Browse…** bu
 
 | Type | Description |
 |------|-------------|
-| SWFK | Software function |
-| CAFD | Coding and adaptation flash data |
-| BTLD | Bootloader |
-| HWEL | Hardware element |
-| FLSL | Flash segment list |
-| ENTD | Entry data |
-| HWAP | Hardware application |
-| SWFL | Software flash |
+| HWEL | Hardware Element — ECU hardware identity |
+| HWAP | Hardware Application — ECU application-layer hardware |
+| HWFR | Hardware Frame — ECU frame/board hardware |
+| GWTB | Gateway Table — gateway routing configuration |
+| CAFD | Coding and Function Data — coding/adaptation flash data |
+| BTLD | Bootloader — flash bootloader |
+| FLSL | Flash Segment List — flash memory map / segment list |
+| SWFL | Software Flash — ECU application software |
+| SWFF | Software Flash File — raw flash file image |
+| SWPF | Software Patch File — incremental SW patch |
+| ONPS | Online Programming Support data |
+| IBAD | Individual Binding Address Data — per-ECU SGBM binding |
+| SWFK | Software Function Component — software module |
+| FAFP | FA Fingerprint — vehicle order fingerprint data |
+| FCFA | Flash Container FA — FA-linked flash container |
+| TLRT | Test/Logistics Runtime data |
+| TPRG | Test Program — factory/diagnostic test program |
+| BLUP | Bootloader Update package |
+| FLUP | Flash Update package |
+| ENTD | Entry Data — base/entry-level configuration data |
+| NAVD | Navigation Data — map / navigation software |
+| FCFN | Flash Container Function — function-linked flash container |
+| SWUP | Software Update Package |
+| SWIP | Software Image Package |
 
 ---
 
