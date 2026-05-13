@@ -52,6 +52,10 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
+_BUILD = "0015"         # kept in sync with VERSION/BUILD by pre-commit hook
+
+_GITHUB_REPO = "atlanteg/bmw-kis-search"
+_GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 R  = "\033[0m";  B  = "\033[1m";  D  = "\033[2m"
@@ -663,8 +667,45 @@ Examples:
     return p
 
 
+def _check_update_cli():
+    """Print a one-line notice and offer to update if a newer build exists."""
+    try:
+        import urllib.request, shutil
+        with urllib.request.urlopen(_GITHUB_RAW + "/VERSION", timeout=4) as r:
+            text = r.read().decode()
+        import re as _re
+        m = _re.search(r"BUILD=(\d+)", text)
+        if not m:
+            return
+        latest = int(m.group(1))
+        current = int(_BUILD)
+        if latest <= current:
+            return
+        print(_c(f"Доступна новая версия v01.{latest:04d}  (текущая v01.{_BUILD})", B, YL),
+              file=sys.stderr)
+        try:
+            ans = input("Обновить сейчас? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if ans != "y":
+            return
+        path = Path(__file__).resolve()
+        tmp  = path.with_suffix(".py.new")
+        urllib.request.urlretrieve(_GITHUB_RAW + "/kis_search.py", tmp)
+        bak = path.with_suffix(".py.bak")
+        bak.unlink(missing_ok=True)
+        shutil.copy2(path, bak)
+        shutil.move(str(tmp), str(path))
+        print(_c(f"Обновлено до v01.{latest:04d}. Перезапустите скрипт.", GR), file=sys.stderr)
+        sys.exit(0)
+    except Exception:
+        pass   # network unavailable or any error — silently skip
+
+
 def main():
     global _USE_COLOR
+
+    _check_update_cli()
 
     parser = build_parser()
     args   = parser.parse_args()

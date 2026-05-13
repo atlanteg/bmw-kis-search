@@ -23,6 +23,7 @@ from pathlib import Path
 root  = Path(sys.argv[1])
 vfile = root / "VERSION"
 gui   = root / "kis_search_gui.py"
+cli   = root / "kis_search.py"
 
 if not vfile.exists():
     sys.exit(0)
@@ -34,15 +35,16 @@ new_b = f"{build + 1:04d}"
 
 vfile.write_text(f"MAJOR={major}\nBUILD={new_b}\n")
 
-content = gui.read_text(encoding="utf-8")
-content = re.sub(
-    r'(_VERSION_BUILD\s*=\s*)"[0-9]+"',
-    rf'\g<1>"{new_b}"',
-    content,
-)
-gui.write_text(content, encoding="utf-8")
+for path, pattern in [
+    (gui, r'(_VERSION_BUILD\s*=\s*)"[0-9]+"'),
+    (cli, r'(_BUILD\s*=\s*)"[0-9]+"'),
+]:
+    if path.exists():
+        content = path.read_text(encoding="utf-8")
+        content = re.sub(pattern, rf'\g<1>"{new_b}"', content)
+        path.write_text(content, encoding="utf-8")
 
 print(f"pre-commit: version {major}.{new_b}")
 PYEOF
 
-git add VERSION kis_search_gui.py
+git add VERSION kis_search_gui.py kis_search.py

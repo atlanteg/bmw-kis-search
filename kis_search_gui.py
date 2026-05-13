@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0014"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0015"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -98,7 +98,9 @@ TYPE_COLORS = {
 }
 _SPINNER = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
-_THIS_DIR = Path(__file__).parent
+_THIS_DIR    = Path(__file__).parent
+_GITHUB_REPO = "atlanteg/bmw-kis-search"
+_GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -291,6 +293,39 @@ def _cache_meta(db_path: Path) -> Path:
     return _cache_dir(db_path) / "meta.pkl"
 
 
+def _fetch_latest_build() -> int | None:
+    """Return latest BUILD int from GitHub VERSION file, or None on failure."""
+    try:
+        import urllib.request as _ur
+        with _ur.urlopen(_GITHUB_RAW + "/VERSION", timeout=5) as r:
+            text = r.read().decode()
+        m = re.search(r"BUILD=(\d+)", text)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _apply_update(root: "tk.Tk"):
+    """Download kis_search_gui.py from GitHub, replace current file, restart."""
+    import urllib.request as _ur, shutil as _sh
+    from tkinter import messagebox
+    path = Path(__file__).resolve()
+    tmp  = path.with_suffix(".py.new")
+    try:
+        _ur.urlretrieve(_GITHUB_RAW + "/kis_search_gui.py", tmp)
+        bak = path.with_suffix(".py.bak")
+        bak.unlink(missing_ok=True)
+        _sh.copy2(path, bak)
+        _sh.move(str(tmp), str(path))
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        messagebox.showerror("Ошибка обновления", str(e), parent=root)
+        return
+    import subprocess
+    subprocess.Popen([sys.executable] + sys.argv)
+    os._exit(0)
+
+
 def _wipe_cache(db_path: Path):
     """Delete all cache files for this database (forces fresh scan)."""
     import shutil as _shutil
@@ -391,12 +426,14 @@ class KisSearchApp:
         self._load_queue : list[Path] = []
 
         # watchdog heartbeat: main thread sets this event every second
-        self._wd_event = threading.Event()
-        self._wd_dot   = True   # for toggling the status-bar indicator
+        self._wd_event     = threading.Event()
+        self._wd_dot       = True
+        self._latest_build = 0
 
         self._setup_style()
         self._build_ui()
         self._start_watchdog()
+        self._start_update_check()
         self._find_and_preload()
 
     # ── ttk style ─────────────────────────────────────────────────────────────
@@ -633,13 +670,18 @@ class KisSearchApp:
                   style="Dim.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(sb, text="ДвойнойКлик / Ctrl+C → копировать Full ID",
                   style="Dim.TLabel").grid(row=0, column=1, sticky="e")
+        # Update notification label (hidden until a newer build is found)
+        self._lbl_update = tk.Label(sb, text="", bg=C_BG, fg=C_YELLOW,
+                                    font=FONT_BOLD, cursor="hand2")
+        self._lbl_update.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        self._lbl_update.bind("<Button-1>", self._on_update_click)
         # Watchdog heartbeat indicator — pulses green every 1 s when alive;
         # stops if frozen; process auto-exits after _WATCHDOG_TIMEOUT seconds.
         self.var_wd = tk.StringVar(value="●")
         self._lbl_wd = tk.Label(sb, textvariable=self.var_wd,
                                 bg=C_BG, fg=C_GREEN,
                                 font=("Consolas", 9), width=1, anchor="center")
-        self._lbl_wd.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self._lbl_wd.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         # ── Context menu ─────────────────────────────────────────────────────
         self._ctx = tk.Menu(self.root, tearoff=False,
@@ -1198,6 +1240,37 @@ class KisSearchApp:
 
     def _set_status(self, text: str):
         self.var_status.set(text)
+
+    # ── Auto-update ───────────────────────────────────────────────────────────
+
+    def _start_update_check(self):
+        threading.Thread(target=self._update_check_run, daemon=True,
+                         name="update-check").start()
+
+    def _update_check_run(self):
+        latest = _fetch_latest_build()
+        if latest is None:
+            return
+        current = int(_VERSION_BUILD)
+        if latest <= current:
+            return
+        self.root.after(0, lambda: self._show_update_badge(latest))
+
+    def _show_update_badge(self, latest: int):
+        self._latest_build = latest
+        self._lbl_update.config(text=f"↑ v01.{latest:04d}")
+
+    def _on_update_click(self, _event=None):
+        from tkinter import messagebox
+        cur  = f"v01.{_VERSION_BUILD}"
+        new  = f"v01.{self._latest_build:04d}"
+        if not messagebox.askyesno("Обновление",
+                f"Доступна {new}  (текущая {cur}).\n\nОбновить и перезапустить?",
+                parent=self.root):
+            return
+        self._lbl_update.config(text="Загрузка…")
+        self.root.update_idletasks()
+        _apply_update(self.root)
 
     # ── Watchdog ──────────────────────────────────────────────────────────────
 
