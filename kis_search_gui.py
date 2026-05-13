@@ -44,7 +44,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0010"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0011"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -107,13 +107,25 @@ _pickle          = None
 _time_mod        = None
 
 
+_MIN_KIS_SEARCH_VERSION = (1, 4, 0)   # must match kis_search.py __version__
+
 def _do_heavy_imports(result_q: queue.Queue):
     try:
         import pickle as _pk
         import time   as _tm
         sys.path.insert(0, str(_THIS_DIR))
-        from kis_search import extract_entries, search, _parse_terms as pt
-        result_q.put(("ok", _pk, _tm, extract_entries, search, pt))
+        import kis_search as _ks
+        # Verify kis_search.py is new enough (type mapping + full_id format)
+        ver_str = getattr(_ks, "__version__", "0.0.0")
+        ver = tuple(int(x) for x in ver_str.split(".")[:3])
+        if ver < _MIN_KIS_SEARCH_VERSION:
+            result_q.put(("err",
+                f"kis_search.py слишком старый (v{ver_str}), нужна v"
+                f"{'.'.join(str(x) for x in _MIN_KIS_SEARCH_VERSION)}+.\n"
+                f"Обнови kis_search.py из репозитория."))
+            return
+        result_q.put(("ok", _pk, _tm,
+                      _ks.extract_entries, _ks.search, _ks._parse_terms))
     except Exception as e:
         result_q.put(("err", str(e)))
 
@@ -476,7 +488,7 @@ class KisSearchApp:
         self.var_wd = tk.StringVar(value="●")
         self._lbl_wd = tk.Label(sb, textvariable=self.var_wd,
                                 bg=C_BG, fg=C_GREEN,
-                                font=("Segoe UI", 8))
+                                font=("Consolas", 9), width=1, anchor="center")
         self._lbl_wd.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         # ── Context menu ─────────────────────────────────────────────────────
