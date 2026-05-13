@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0030"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0031"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -1300,7 +1300,18 @@ class KisSearchApp:
 
     def _show_update_badge(self, latest: int):
         self._latest_build = latest
-        self._lbl_update.config(text=f"↑ v01.{latest:04d}")
+        self._lbl_update.config(
+            text=f"  ↑  Обновить до v01.{latest:04d}  ",
+            fg=C_BG, bg=C_YELLOW,
+            relief="flat", padx=6, pady=2,
+        )
+        self._pulse_badge(True)
+
+    def _pulse_badge(self, bright: bool):
+        if not self._latest_build:
+            return
+        self._lbl_update.config(bg=C_YELLOW if bright else "#b8960a")
+        self._lbl_update.after(600, lambda: self._pulse_badge(not bright))
 
     def _on_update_click(self, _event=None):
         from tkinter import messagebox
