@@ -52,7 +52,7 @@ except ImportError:
     pass
 
 __version__ = "1.4.0"   # full_id now in BMW format TYPE_SGBM_NR_VER (e.g. IBAD_00002712_007_047_001)
-_BUILD = "0032"         # kept in sync with VERSION/BUILD by pre-commit hook
+_BUILD = "0033"         # kept in sync with VERSION/BUILD by pre-commit hook
 
 _GITHUB_REPO = "atlanteg/bmw-kis-search"
 _GITHUB_RAW  = f"https://raw.githubusercontent.com/{_GITHUB_REPO}/main"
@@ -704,7 +704,16 @@ def _check_update_cli():
             return
         path = Path(__file__).resolve()
         tmp  = path.with_suffix(".py.new")
-        urllib.request.urlretrieve(_GITHUB_RAW + "/kis_search.py", tmp)
+        # Use GitHub Contents API to bypass Fastly CDN cache
+        api_req = urllib.request.Request(
+            f"https://api.github.com/repos/{_GITHUB_REPO}/contents/kis_search.py",
+            headers={
+                "User-Agent": f"bmw-kis-search/v01.{_BUILD}",
+                "Accept":     "application/vnd.github.raw",
+            },
+        )
+        with urllib.request.urlopen(api_req, timeout=30) as resp:
+            tmp.write_bytes(resp.read())
         # Verify downloaded file actually contains a newer build
         try:
             import re as _re2
