@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0020"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0021"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -297,7 +297,11 @@ def _fetch_latest_build() -> int | None:
     """Return latest BUILD int from GitHub VERSION file, or None on failure."""
     try:
         import urllib.request as _ur
-        with _ur.urlopen(_GITHUB_RAW + "/VERSION", timeout=5) as r:
+        req = _ur.Request(
+            _GITHUB_RAW + "/VERSION",
+            headers={"User-Agent": f"bmw-kis-search/v01.{_VERSION_BUILD}"},
+        )
+        with _ur.urlopen(req, timeout=8) as r:
             text = r.read().decode()
         m = re.search(r"BUILD=(\d+)", text)
         return int(m.group(1)) if m else None
@@ -1265,7 +1269,14 @@ class KisSearchApp:
                          name="update-check").start()
 
     def _update_check_run(self):
-        latest = _fetch_latest_build()
+        # Retry up to 3 times with increasing delays (5s, 30s, 120s)
+        # in case the network isn't ready at startup.
+        for delay in (0, 5, 30, 120):
+            if delay:
+                _time_mod.sleep(delay)
+            latest = _fetch_latest_build()
+            if latest is not None:
+                break
         if latest is None:
             return
         current = int(_VERSION_BUILD)
