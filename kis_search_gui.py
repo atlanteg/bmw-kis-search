@@ -48,7 +48,7 @@ if sys.platform == "win32":
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _VERSION_MAJOR = "01"
-_VERSION_BUILD = "0013"   # auto-incremented by pre-commit hook
+_VERSION_BUILD = "0014"   # auto-incremented by pre-commit hook
 APP_TITLE   = (f"BMW KIS Search  ·  v{_VERSION_MAJOR}.{_VERSION_BUILD}"
                f"  ·  by NBTboost creators © Atlanteg")
 WIN_W, WIN_H = 1150, 720
@@ -66,7 +66,7 @@ COL_ANCHOR  = ("w",         "c",    "w",        "w",        "w")
 
 # Each Treeview insert/delete call on Windows takes 2–10 ms.
 # Limit visible rows; chunk inserts/deletes to never block > ~100 ms at once.
-MAX_DISPLAY   = 100
+MAX_DISPLAY   = 500
 
 # Watchdog: if the Tkinter event loop stops ticking for this many seconds
 # (UI is frozen / GIL permanently held), force-exit the process.
@@ -1028,7 +1028,7 @@ class KisSearchApp:
         shown = min(total, MAX_DISPLAY)
         parts = []
         if total > MAX_DISPLAY:
-            parts.append(f"{total:,} результатов  (показано {shown} — уточните поиск)")
+            parts.append(f"{total:,} результатов  (показано первые {shown})")
         else:
             parts.append(f"{total:,} результатов")
         if inc_raw: parts.append(f"поиск: {inc_raw}")
